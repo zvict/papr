@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="description"
+        content="Point-based scene representation and rendering method with Proximity Attention Point Rendering (PAPR).">
+  <meta name="keywords" content="PAPR, Point cloud">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PAPR: Proximity Attention Point Rendering</title>
+
+  <link rel="stylesheet" href="./static/css/bulma.min.css">
+  <link rel="stylesheet" href="./static/css/bulma-carousel.min.css">
+  <link rel="stylesheet" href="./static/css/bulma-slider.min.css">
+  <link rel="stylesheet" href="./static/css/fontawesome.all.min.css">
+  <link rel="stylesheet"
+        href="https://cdn.jsdelivr.net/gh/jpswalsh/academicons@1/css/academicons.min.css">
+  <link rel="stylesheet" href="./static/css/index.css">
+
+  <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
+  <script defer src="./static/js/fontawesome.all.min.js"></script>
+  <script src="./static/js/bulma-carousel.min.js"></script>
+  <script src="./static/js/bulma-slider.min.js"></script>
+  <script src="./static/js/index.js"></script>
+  <link rel="icon" type="image/x-icon" href="./static/images/favicon.ico">
+</head>
+<body>
+
+
+<section class="hero">
+  <div class="hero-body">
+    <div class="container is-max-desktop">
+      <div class="columns is-centered">
+        <div class="column has-text-centered">
+          <h1 class="title is-1 publication-title">PAPR: Proximity Attention Point Rendering</h1>
+          <h2 class="title is-size-5 publication-title" style="color:red">🌟 <b>NeurIPS 2023 Spotlight</b> 🌟</h2>
+          <div class="is-size-5 publication-authors">
+            <span class="author-block">
+              <a href="https://zvict.github.io/">Yanshu Zhang</a>*,</span>
+            <span class="author-block">
+              <a href="https://sites.google.com/view/niopeng/home">Shichong Peng</a>*,</span>
+            <span class="author-block">
+              <a href="https://amoazeni75.github.io/">Alireza Moazeni</a>,
+            </span>
+            <span class="author-block">
+              <a href="https://www.math.ias.edu/~ke.li/">Ke Li</a>
+            </span>
+          </div>
+
+          <div class="is-size-5 publication-authors">
+            <span class="author-block">APEX Lab, Simon Fraser University<br>* Denotes Equal Contribution.</p></span>
+          </div>
+
+          <div class="column has-text-centered">
+            <div class="publication-links">
+              <!-- PDF Link. -->
+              <span class="link-block">
+                <a href="https://arxiv.org/abs/2307.11086"
+                   class="external-link button is-normal is-rounded is-dark">
+                  <span class="icon">
+                      <i class="ai ai-arxiv"></i>
+                  </span>
+                  <span>arXiv</span>
+                </a>
+              </span>
+              <!-- Video Link. -->
+              <span class="link-block">
+                <a href="https://youtu.be/1atBGH_pDHY"
+                   class="external-link button is-normal is-rounded is-dark">
+                  <span class="icon">
+                      <i class="fab fa-youtube"></i>
+                  </span>
+                  <span>Video</span>
+                </a>
+              </span>
+              <!-- Code Link. -->
+              <span class="link-block">
+                <a href=""
+                   class="external-link button is-normal is-rounded is-dark">
+                  <span class="icon">
+                      <i class="fab fa-github"></i>
+                  </span>
+                  <span>Code (Coming Soon)</span>
+                  </a>
+              </span>
+            </div>
+
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+
+<section class="section">
+  <div class="container is-max-desktop">
+    <div class="columns is-centered">
+      <div class="column is-full-width">
+        <h2 class="title is-3">Overview</h2>
+        <p>
+          Given a set of images from different views and their corresponding camera poses,
+          PAPR learns a point-based surface representation of the scene and a rendering pipeline from scratch.
+          Additionally, PAPR enables practical applications such as <a href="#editing">geometry editing</a>,
+          <a href="#manipulation">object manipulation</a>, <a href="#transfer">texture transfer</a>, and <a href="#exposure">exposure control</a>.
+        </p>
+    
+      </div>
+    </div>
+
+    <div class="columns">
+      <div class="content column">
+        <video id="replay-video" autoplay muted loop playsinline width="100%">
+          <source src="./static/videos/overview.mp4" type="video/mp4">
+        </video>
+      </div>
+    </div>
+  </div>
+</section>
+
+
+<!-- Paper video. -->
+<section class="section">
+  <div class="container is-max-desktop">
+    <div class="columns is-centered has-text-centered">
+      <div class="column is-four-fifths">
+        <div class="publication-video">
+          <iframe width="560" height="315" src="https://www.youtube-nocookie.com/embed/1atBGH_pDHY" title="YouTube video player"
+            frameborder="0"
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+            allowfullscreen></iframe>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+
+<section class="hero is-light is-small">
+  <div class="hero-body">
+    <div class="container is-max-desktop">
+      <h2 class="title is-3">Qualitative Results</h2>
+      <p>
+        We show the RGB rendering of the scene in the first row and the corresponding learnt point cloud
+        in the second row.
+      </p>
+      <div id="results-carousel" class="carousel results-carousel">
+        <div class="item item-lego">
+          <video poster="" id="lego" autoplay controls muted loop playsinline height="100%">
+            <source src="./static/videos/lego-rgb.mp4"
+                    type="video/mp4">
+          </video>
+          <video poster="" id="lego" autoplay controls muted loop playsinline height="100%">
+            <source src="./static/videos/lego-pc.mp4" type="video/mp4">
+          </video>
+        </div>
+        <div class="item item-chair">
+          <video poster="" id="chair" autoplay controls muted loop playsinline height="100%">
+            <source src="./static/videos/chair-rgb.mp4" type="video/mp4">
+          </video>
+          <video poster="" id="chair" autoplay controls muted loop playsinline height="100%">
+            <source src="./static/videos/chair-pc.mp4" type="video/mp4">
+          </video>
+        </div>
+        <div class="item item-ficus">
+          <video poster="" id="ficus" autoplay controls muted loop playsinline height="100%">
+            <source src="./static/videos/ficus-rgb.mp4" type="video/mp4">
+          </video>
+          <video poster="" id="ficus" autoplay controls muted loop playsinline height="100%">
+            <source src="./static/videos/ficus-pc.mp4" type="video/mp4">
+          </video>
+        </div>
+        <div class="item item-drums">
+          <video poster="" id="drums" autoplay controls muted loop playsinline height="100%">
+            <source src="./static/videos/drums-rgb.mp4" type="video/mp4">
+          </video>
+          <video poster="" id="drums" autoplay controls muted loop playsinline height="100%">
+            <source src="./static/videos/drums-pc.mp4" type="video/mp4">
+          </video>
+        </div>
+        <div class="item item-hotdog">
+          <video poster="" id="hotdog" autoplay controls muted loop playsinline height="100%">
+            <source src="./static/videos/hotdog-rgb.mp4" type="video/mp4">
+          </video>
+          <video poster="" id="hotdog" autoplay controls muted loop playsinline height="100%">
+            <source src="./static/videos/hotdog-pc.mp4" type="video/mp4">
+          </video>
+        </div>
+        <div class="item item-mic">
+          <video poster="" id="mic" autoplay controls muted loop playsinline height="100%">
+            <source src="./static/videos/mic-rgb.mp4" type="video/mp4">
+          </video>
+          <video poster="" id="mic" autoplay controls muted loop playsinline height="100%">
+            <source src="./static/videos/mic-pc.mp4" type="video/mp4">
+          </video>
+        </div>
+        <div class="item item-materials">
+          <video poster="" id="materials" autoplay controls muted loop playsinline height="100%">
+            <source src="./static/videos/materials-rgb.mp4" type="video/mp4">
+          </video>
+          <video poster="" id="materials" autoplay controls muted loop playsinline height="100%">
+            <source src="./static/videos/materials-pc.mp4" type="video/mp4">
+          </video>
+        </div>
+        <div class="item item-ship">
+          <video poster="" id="ship" autoplay controls muted loop playsinline height="100%">
+            <source src="./static/videos/ship-rgb.mp4" type="video/mp4">
+          </video>
+          <video poster="" id="ship" autoplay controls muted loop playsinline height="100%">
+            <source src="./static/videos/ship-pc.mp4" type="video/mp4">
+          </video>
+        </div>
+        <div class="item item-Barn">
+          <video poster="" id="Barn" autoplay controls muted loop playsinline height="100%">
+            <source src="./static/videos/Barn-rgb.mp4" type="video/mp4">
+          </video>
+          <video poster="" id="Barn" autoplay controls muted loop playsinline height="100%">
+            <source src="./static/videos/Barn-pc.mp4" type="video/mp4">
+          </video>
+        </div>
+        <div class="item item-Caterpillar">
+          <video poster="" id="Caterpillar" autoplay controls muted loop playsinline height="100%">
+            <source src="./static/videos/Caterpillar-rgb.mp4" type="video/mp4">
+          </video>
+          <video poster="" id="Caterpillar" autoplay controls muted loop playsinline height="100%">
+            <source src="./static/videos/Caterpillar-pc.mp4" type="video/mp4">
+          </video>
+        </div>
+        <div class="item item-Ignatius">
+          <video poster="" id="Ignatius" autoplay controls muted loop playsinline height="100%">
+            <source src="./static/videos/Ignatius-rgb.mp4" type="video/mp4">
+          </video>
+          <video poster="" id="Ignatius" autoplay controls muted loop playsinline height="100%">
+            <source src="./static/videos/Ignatius-pc.mp4" type="video/mp4">
+          </video>
+        </div>
+        <div class="item item-Family">
+          <video poster="" id="Family" autoplay controls muted loop playsinline height="100%">
+            <source src="./static/videos/Family-rgb.mp4" type="video/mp4">
+          </video>
+          <video poster="" id="Family" autoplay controls muted loop playsinline height="100%">
+            <source src="./static/videos/Family-pc.mp4" type="video/mp4">
+          </video>
+        </div>
+        <div class="item item-Truck">
+          <video poster="" id="Truck" autoplay controls muted loop playsinline height="100%">
+            <source src="./static/videos/Truck-rgb.mp4" type="video/mp4">
+          </video>
+          <video poster="" id="Truck" autoplay controls muted loop playsinline height="100%">
+            <source src="./static/videos/Truck-pc.mp4" type="video/mp4">
+          </video>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+
+
+
+<section class="section">
+  <div class="container is-max-desktop">
+
+    <!-- Geometry editing. -->
+    <div class="columns is-centered" id="editing">
+      <div class="column is-full-width">
+        <h2 class="title is-3">Geometry Editing</h2>
+        <p>
+          We can edit the geometry of the scene by simply manipulating the point cloud of the scene <b>without any additional supervision</b>. 
+          Here we demonstrate rigid bending motions applied to the ficus branch and the Lego bulldozer's arm in the first column,
+          roation of the statue's head and the ship in the second column,
+          and non-volume preserving stretching transformations applied to the tip of the microphone and the back of the chair in the third column.   
+        </p>
+        
+      </div>
+    </div>
+
+    <div class="columns">
+      <div class="content column">
+        <video id="replay-video" autoplay controls muted loop playsinline width="100%">
+          <source src="./static/videos/ficus-bend.mp4" type="video/mp4">
+        </video>
+      </div>
+      <div class="content column">
+        <video id="replay-video" autoplay controls muted loop playsinline width="100%">
+          <source src="./static/videos/Ignatius-shake.mp4" type="video/mp4">
+        </video>
+      </div>
+      <div class="content column">
+        <video id="replay-video" autoplay controls muted loop playsinline width="100%">
+          <source src="./static/videos/mic-bend.mp4" type="video/mp4">
+        </video>
+      </div>
+    </div>
+
+    <div class="columns">
+      <div class="content column">
+        <video id="replay-video" autoplay controls muted loop playsinline width="100%" onloadstart="this.playbackRate = 1;">
+          <source src="./static/videos/lego-shovel.mp4" type="video/mp4">
+        </video>
+      </div>
+      <div class="content column">
+        <video id="replay-video" autoplay controls muted loop playsinline width="100%" onloadstart="this.playbackRate = 1;">
+          <source src="./static/videos/ship-float.mp4" type="video/mp4">
+        </video>
+      </div>
+      <div class="content column">
+        <video id="replay-video" autoplay controls muted loop playsinline width="100%" onloadstart="this.playbackRate = 1;">
+          <source src="./static/videos/chair-bend.mp4" type="video/mp4">
+        </video>
+      </div>
+    </div>
+    <!--/ Geometry editing. -->
+
+    <!-- Object Manipulation. -->
+    <div class="columns is-centered" id="manipulation">
+      <div class="column is-full-width">
+        <h2 class="title is-3">Object Manipulation</h2>
+        <p>
+          We can edit the scene by adding, removing or duplicating points in the point cloud.
+          Here we demonstrate the addition of an extra hotdog to the plate (left),
+          and the removal of certain material balls while duplicating others (right).
+        </p>
+    
+      </div>
+    </div>
+    
+    <div class="columns">
+      <div class="content column">
+        <video id="replay-video" autoplay controls muted loop playsinline width="100%" onloadstart="this.playbackRate = 2;">
+          <source src="./static/videos/hotdog-add.mp4" type="video/mp4">
+        </video>
+      </div>
+      <div class="content column">
+        <video id="replay-video" autoplay controls muted loop playsinline width="100%" onloadstart="this.playbackRate = 1.5;">
+          <source src="./static/videos/materials-edit.mp4" type="video/mp4">
+        </video>
+      </div>
+    </div>
+    <!--/ Object Manipulation. -->
+
+    <!-- Texture Transfer. -->
+    <div class="columns is-centered" id="transfer">
+      <div class="column is-full-width">
+        <h2 class="title is-3">Texture Transfer</h2>
+        <p>
+          We can transfer the texture from one part of the scene to another 
+          by transferring the associated feature vectors of the corresponding points.
+          Here we transfer the texture of the mustard to the ketchup by transferring the 
+          features of the points that correspond to the mustard (highlighted in yellow) to 
+          a subset of points that correspond to the ketchup (highlighted in red).
+        </p>
+    
+      </div>
+    </div>
+    
+    <div class="columns">
+      <div class="content column">
+        <video id="replay-video" autoplay controls muted loop playsinline width="75%" onloadstart="this.playbackRate = 2;">
+          <source src="./static/videos/hotdog-featswap-pc-mus.mp4" type="video/mp4">
+        </video>
+      </div>
+      <div class="content column">
+        <video id="replay-video" autoplay controls muted loop playsinline width="75%"
+          onloadstart="this.playbackRate = 2;">
+          <source src="./static/videos/hotdog-featswap.mp4" type="video/mp4">
+        </video>
+      </div>
+    </div>
+    <!--/ Texture Transfer. -->
+
+    <!-- Exposure Control. -->
+    <div class="columns is-centered" id="exposure">
+      <div class="column is-full-width">
+        <h2 class="title is-3">Exposure Control</h2>
+        <p>
+          We introduce an additional latent code input into our model and train it using a technique called 
+          <a href="https://arxiv.org/abs/2004.03590">conditional Implicit Maximum Likelihood Estimation (cIMLE)</a>. 
+          During test time, we can manipulate the exposure of the rendered image by changing the latent
+          code input.
+        </p>
+    
+      </div>
+    </div>
+    
+    <div class="columns">
+      <div class="content column">
+        <video id="replay-video" autoplay controls muted loop playsinline width="80%">
+          <source src="./static/videos/Caterpillar-exposure.mp4" type="video/mp4">
+        </video>
+      </div>
+    </div>
+    <!--/ Exposure Control. -->
+
+  </div>
+</section>
+
+
+<section class="section" id="BibTeX">
+  <div class="container is-max-desktop content">
+    <h2 class="title">BibTeX</h2>
+    <pre><code>@article{zhang2023papr,
+  author    = {Zhang*, Yanshu and Peng*, Shichong and Moazeni, Alireza and Li, Ke},
+  title     = {PAPR: Proximity Attention Point Rendering},
+  journal   = {Advances in Neural Information Processing Systems},
+  year      = {2023},
+}</code></pre>
+  </div>
+</section>
+
+
+<footer class="footer">
+  <div class="container">
+    <div class="columns is-centered has-text-centered">
+      <div class="column is-8">
+        <div class="content">
+          <p>
+            This website is adapted from adapted from <a href="https://github.com/nerfies/nerfies.github.io">Nerfies</a>.
+        </div>
+      </div>
+    </div>
+  </div>
+</footer>
+
+<script type="text/javascript">
+
+  $(document).ready(function () {
+    // Add smooth scrolling to all links
+    $("a").on('click', function (event) {
+
+      // Make sure this.hash has a value before overriding default behavior
+      if (this.hash !== "") {
+        // Prevent default anchor click behavior
+        event.preventDefault();
+
+        // Store hash
+        var hash = this.hash;
+
+        // Using jQuery's animate() method to add smooth page scroll
+        // The optional number (800) specifies the number of milliseconds it takes to scroll to the specified area
+        $('html, body').animate({
+          scrollTop: $(hash).offset().top
+        }, 600, function () {
+
+          // Add hash (#) to URL when done scrolling (default click behavior)
+          window.location.hash = hash;
+        });
+      } // End if
+    });
+  });
+
+</script>
+
+
+</body>
+</html>
