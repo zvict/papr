@@ -54,13 +54,13 @@ papr
 │   │   │   ├── intrinsics.txt
 │   │   ├── ...
 ```
-### NeRF Synthetic
-Download `nerf_synthetic.zip` from [here](https://drive.google.com/drive/folders/128yBriW1IG_3NJ5Rp7APSTZsJqdJdfc1) under ``data/nerf_synthetic/''
+#### NeRF Synthetic
+Download NeRF Synthetic Dataset from [here](https://drive.google.com/drive/folders/128yBriW1IG_3NJ5Rp7APSTZsJqdJdfc1) and put it under `data/nerf_synthetic/`
 
 
-### Tanks & Temples
-Follow Neural Sparse Voxel Fields and download [Tanks&Temples](https://www.tanksandtemples.org/) | [download (.zip)](https://dl.fbaipublicfiles.com/nsvf/dataset/TanksAndTemple.zip) | 0_\* (training) 1_\* (testing) as:
-``data/tanks_temples/''
+#### Tanks & Temples
+Download [Tanks&Temples](https://www.tanksandtemples.org/) from [here](https://dl.fbaipublicfiles.com/nsvf/dataset/TanksAndTemple.zip) and put it under:
+`data/tanks_temples/`
 
 ## Training
 Config files will be added soon.
