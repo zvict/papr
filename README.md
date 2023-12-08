@@ -7,6 +7,8 @@
  | [Paper](https://arxiv.org/abs/2307.11086) |
 Primary contact: [Yanshu Zhang](https://zvict.github.io/)
 
+### The code will be released soon!
+
 Proximity Attention Point Rendering (PAPR) is a new method for joint novel view synthesis and 3D reconstruction. It simultaneously learns from scratch an accurate point cloud representation of the scene surface, and an attention-based neural network that renders the point cloud from novel views.
 
 <!-- <img src="./images/pipeline.png" /> -->
@@ -63,14 +65,14 @@ Download NeRF Synthetic Dataset from [here](https://drive.google.com/drive/folde
 Download [Tanks&Temples](https://www.tanksandtemples.org/) from [here](https://dl.fbaipublicfiles.com/nsvf/dataset/TanksAndTemple.zip) and put it under:
 `data/tanks_temples/`
 
+## Overview
+
 ## Training
-Config files will be added soon.
 ```
 python train.py --opt configs/nerfsyn/chair.yml
 ```
 
 # Evaluation
-Config files will be added soon.
 ```
 python test.py --opt configs/nerfsyn/chair.yml
 ```
