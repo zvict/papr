@@ -72,7 +72,7 @@ Download [Tanks&Temples](https://www.tanksandtemples.org/) from [here](https://d
 python train.py --opt configs/nerfsyn/chair.yml
 ```
 
-# Evaluation
+## Evaluation
 ```
 python test.py --opt configs/nerfsyn/chair.yml
 ```
