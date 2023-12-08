@@ -1,6 +1,7 @@
 # PAPR: Proximity Attention Point Rendering (NeurIPS 2023 Spotlight 🤩)
 [Yanshu Zhang*](https://zvict.github.io/), [Shichong Peng*](https://sites.google.com/view/niopeng/home), [Alireza Moazeni](https://amoazeni75.github.io/), [Ke Li](https://www.sfu.ca/~keli/) (* denotes equal contribution)<br>
-<img src="./images/SFU_AI.png" height=120px /><img src="images/APEX_lab.png" height=120px />
+
+<img src="./images/SFU_AI.png" height=100px /><img src="images/APEX_lab.png" height=120px />
 
 [Project Sites](https://zvict.github.io/papr)
  | [Paper](https://arxiv.org/abs/2307.11086) |
