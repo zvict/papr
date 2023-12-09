@@ -79,5 +79,3 @@ python test.py --opt configs/nerfsyn/chair.yml
 
 ## Acknowledgement
 This research was enabled in part by support provided by NSERC, the BC DRI Group and the Digital Research Alliance of Canada.
-
-## LICENSE
