@@ -74,12 +74,12 @@
               </span>
               <!-- Code Link. -->
               <span class="link-block">
-                <a href=""
+                <a href="https://github.com/zvict/papr"
                    class="external-link button is-normal is-rounded is-dark">
                   <span class="icon">
                       <i class="fab fa-github"></i>
                   </span>
-                  <span>Code (Coming Soon)</span>
+                  <span>Code</span>
                   </a>
               </span>
             </div>
@@ -259,11 +259,31 @@
 
 <section class="section">
   <div class="container is-max-desktop">
+    <!-- Learning PC -->
+    <div class="columns is-centered" id="exposure">
+      <div class="column is-full-width">
+        <h2 class="title is-3">Learning Point Positions from Scratch</h2>
+        <p>
+          Our method deforms the initial point cloud to correctly represent the target geometry. In contrast, 
+          the baselines either fail to recover the geometry, produce noisy results, or lack structural details in the learnt geometry.
+        </p>
+    
+      </div>
+    </div>
+    
+    <div class="columns">
+      <div class="content column">
+        <video id="replay-video" autoplay controls muted loop playsinline width="80%">
+          <source src="./static/videos/papr_e2e.mp4" type="video/mp4">
+        </video>
+      </div>
+    </div>
+    <!--/ Learning PC -->
 
     <!-- Geometry editing. -->
     <div class="columns is-centered" id="editing">
       <div class="column is-full-width">
-        <h2 class="title is-3">Geometry Editing</h2>
+        <h2 class="title is-3">Zero-shot Geometry Editing</h2>
         <p>
           We can edit the geometry of the scene by simply manipulating the point cloud of the scene <b>without any additional supervision</b>. 
           Here we demonstrate rigid bending motions applied to the ficus branch and the Lego bulldozer's arm in the first column,
@@ -310,6 +330,29 @@
       </div>
     </div>
     <!--/ Geometry editing. -->
+
+    <!-- Geometry editing comparison -->
+    <div class="columns is-centered" id="exposure">
+      <div class="column is-full-width">
+        <h2 class="title is-5">Comparison with Gaussian Splatting</h2>
+        <p>
+          <a href="https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/">Gaussian Splatting</a> produces significant noise after the
+          non-volume preserving stretching transformation. In contrast, our method successfully 
+          avoids creating holes and effectively preserves the
+          texture details after the transformation.
+        </p>
+    
+      </div>
+    </div>
+    
+    <div class="columns">
+      <div class="content column">
+        <video id="replay-video" autoplay controls muted loop playsinline width="80%">
+          <source src="./static/videos/papr_streching_gs.mp4" type="video/mp4">
+        </video>
+      </div>
+    </div>
+    <!--/ Geometry editing comparison -->
 
     <!-- Object Manipulation. -->
     <div class="columns is-centered" id="manipulation">
@@ -398,12 +441,12 @@
 <section class="section" id="BibTeX">
   <div class="container is-max-desktop content">
     <h2 class="title">BibTeX</h2>
-    <pre><code>@article{zhang2023papr,
-  author    = {Zhang*, Yanshu and Peng*, Shichong and Moazeni, Alireza and Li, Ke},
-  title     = {PAPR: Proximity Attention Point Rendering},
-  journal   = {Advances in Neural Information Processing Systems},
-  year      = {2023},
-}</code></pre>
+    <pre><code>@inproceedings{zhang2023papr,
+      title={PAPR: Proximity Attention Point Rendering},
+      author={Yanshu Zhang and Shichong Peng and Seyed Alireza Moazenipourasil and Ke Li},
+      booktitle={Thirty-seventh Conference on Neural Information Processing Systems},
+      year={2023}
+  }</code></pre>
   </div>
 </section>
 
