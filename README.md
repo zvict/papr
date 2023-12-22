@@ -7,8 +7,6 @@
  | [Paper](https://arxiv.org/abs/2307.11086) |
 Primary contact: [Yanshu Zhang](https://zvict.github.io/)
 
-### The code will be released soon!
-
 Proximity Attention Point Rendering (PAPR) is a new method for joint novel view synthesis and 3D reconstruction. It simultaneously learns from scratch an accurate point cloud representation of the scene surface, and an attention-based neural network that renders the point cloud from novel views.
 
 <!-- <img src="./images/pipeline.png" /> -->
@@ -22,8 +20,7 @@ Proximity Attention Point Rendering (PAPR) is a new method for joint novel view 
     title={PAPR: Proximity Attention Point Rendering},
     author={Yanshu Zhang and Shichong Peng and Seyed Alireza Moazenipourasil and Ke Li},
     booktitle={Thirty-seventh Conference on Neural Information Processing Systems},
-    year={2023},
-    url={https://openreview.net/forum?id=CgJJvuLjec}
+    year={2023}
 }
 ```
 
@@ -67,6 +64,8 @@ Download [Tanks&Temples](https://www.tanksandtemples.org/) from [here](https://d
 
 ## Overview
 
+The codebase has two main components: data loading part in `dataset/` and models in `model/`. Class `PAPR` in `model/model.py` defines our main model. All the configurations are in `configs/`, and `configs/demo.yml` is a demo configuration with comments of important arguments.
+
 ## Training
 ```
 python train.py --opt configs/nerfsyn/chair.yml
@@ -76,6 +75,11 @@ python train.py --opt configs/nerfsyn/chair.yml
 ```
 python test.py --opt configs/nerfsyn/chair.yml
 ```
+
+## Pretrained Models
+
+We provide pretrained models on NeRF Synthetic and Tanks&Temples datasets here: [Google Drive](https://drive.google.com/drive/folders/1fTWjuE-I30tBFCshbvC1W0TDdTlM-j82?usp=sharing).
+To load the pretrained models, please put them under `checkpoints/`, and change the `test.load_path` in the config file.
 
 ## Acknowledgement
 This research was enabled in part by support provided by NSERC, the BC DRI Group and the Digital Research Alliance of Canada.

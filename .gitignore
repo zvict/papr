@@ -1,0 +1,11 @@
+**/__pycache__
+data
+.vscode/
+data/
+experiments/
+*.pth
+*.pt
+*.out
+*.mp4
+*.tar.gz
+!vgg.pth
