@@ -64,7 +64,7 @@ Download [Tanks&Temples](https://www.tanksandtemples.org/) from [here](https://d
 
 ## Overview
 
-The codebase has two main components: data loading part in `dataset/` and models in `model/`. Class `PAPR` in `model/model.py` defines our main model. All the configurations are in `configs/`, and `configs/demo.yml` is a demo configuration with comments of important arguments.
+The codebase has two main components: data loading part in `dataset/` and models in `models/`. Class `PAPR` in `models/model.py` defines our main model. All the configurations are in `configs/`, and `configs/demo.yml` is a demo configuration with comments of important arguments.
 
 ## Training
 ```
