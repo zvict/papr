@@ -31,6 +31,12 @@ cd papr
 conda env create -f papr.yml
 conda activate papr
 ```
+Or use virtual environment with `python=3.9`
+```
+python -m venv path/to/<env_name>
+source path/to/<env_name>/bin/activate
+pip install -r requirements.txt
+```
 
 ## Data Preparation
 

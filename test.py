@@ -165,9 +165,9 @@ def test_step(frame, num_frames, model, device, dataset, batch, loss_fn, lpips_l
         if plot_opt.featattn:   # Note that these plots are not necessarily meaningful since each ray has different top K points
             featmap_np = feature_map[0].squeeze().detach().cpu().numpy().astype(np.float32)
             attn_np = attn[0].squeeze().detach().cpu().numpy().astype(np.float32)
-            get_test_featmap_attn(frame, th, points_np, rgb_pred_np, rgb_gt_np,
+            featattn_plot = get_test_featmap_attn(frame, th, points_np, rgb_pred_np, rgb_gt_np,
                                 pt_plot_scale, featmap_np, attn_np, points_influ_scores_np)
-            plots["featattn"] = img
+            plots["featattn"] = featattn_plot
 
     return plots
 

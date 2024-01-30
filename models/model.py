@@ -52,7 +52,7 @@ class PAPR(nn.Module):
                 points = self._cube_normal_pc(pt_init_center, point_opt.num, pt_init_scale)
             else:
                 raise NotImplementedError("Point init type [{:s}] is not found".format(point_opt.init_type))
-            print("Scratch points scale: ", points[:, 0].min(), points[:, 0].max(), points[:, 1].min(), points[:, 1].max(), points[:, 2].min(), points[:, 2].max())
+            print("Initialized points scale: ", points[:, 0].min(), points[:, 0].max(), points[:, 1].min(), points[:, 1].max(), points[:, 2].min(), points[:, 2].max())
         self.points = torch.nn.Parameter(points, requires_grad=True)
 
         # Initialize point influence scores
@@ -71,7 +71,7 @@ class PAPR(nn.Module):
             feat_dim = tx_opt.embed.d_ff_out if tx_opt.embed.share_embed else tx_opt.embed.value.d_ff_out
             self.renderer = get_generator(args.models.renderer.generator, in_c=feat_dim,
                                           out_c=3, use_amp=self.use_amp, amp_dtype=self.amp_dtype)
-            print("Renderer: ", count_parameters(self.renderer))
+            print("Number of parameters of renderer: ", count_parameters(self.renderer))
         else:
             assert (args.models.transformer.embed.share_embed and args.models.transformer.embed.d_ff_out == 3) or \
                 (not args.models.transformer.embed.share_embed and args.models.transformer.embed.value.d_ff_out == 3), \

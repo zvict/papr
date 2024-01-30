@@ -84,7 +84,7 @@ def get_rays(H, W, focal_x, focal_y, c2w, fineness=1):
         0, W / focal_x, steps=int(W / fineness) + 1, dtype=torch.float32)
     height = torch.linspace(
         0, H / focal_y, steps=int(H / fineness) + 1, dtype=torch.float32)
-    y, x = torch.meshgrid(height, width)
+    y, x = torch.meshgrid(height, width, indexing='ij')
     pixel_size_x = width[1] - width[0]
     pixel_size_y = height[1] - height[0]
     x = (x - W / focal_x / 2 + pixel_size_x / 2)[:-1, :-1]

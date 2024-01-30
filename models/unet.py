@@ -106,7 +106,6 @@ class Up(nn.Module):
 
     def __init__(self, in_channels, out_channels, bilinear=True, single=False, norm='none'):
         super().__init__()
-        print('up norm:', norm)
 
         # if bilinear, use the normal convolutions to reduce the number of channels
         if bilinear:

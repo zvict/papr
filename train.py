@@ -188,7 +188,6 @@ def train_step(step, model, device, dataset, batch, loss_fn, args):
 
 def train_and_eval(start_step, model, device, dataset, eval_dataset, losses, args):
     trainloader = get_loader(dataset, args.dataset, mode="train")
-    print("trainloader:", trainloader)
 
     loss_fn = get_loss(args.training.losses)
     loss_fn = loss_fn.to(device)
