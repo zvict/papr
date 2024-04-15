@@ -20,7 +20,7 @@ except:
     from skimage.metrics import structural_similarity
 
     def compare_ssim(gt, img, win_size, channel_axis=2):
-        return structural_similarity(gt, img, win_size=win_size, channel_axis=channel_axis)
+        return structural_similarity(gt, img, win_size=win_size, channel_axis=channel_axis, data_range=1.0)
 
 
 class DictAsMember(dict):
@@ -82,20 +82,20 @@ def test_step(frame, num_frames, model, device, dataset, batch, loss_fn, lpips_l
 
         if args.models.use_renderer:
             foreground_rgb = model.renderer(feature_map.squeeze(-2).permute(0, 3, 1, 2)).permute(0, 2, 3, 1).unsqueeze(-2)   # (N, H, W, 1, 3)
-            if model.bkg_feats is not None:
-                bkg_attn = attn[..., topk:, :]
-                if args.models.normalize_topk_attn:
-                    rgb = foreground_rgb * (1 - bkg_attn) + model.bkg_feats.expand(N, H, W, -1, -1) * bkg_attn
-                    bkg_mask = (model.bkg_feats.expand(N, H, W, -1, -1) * bkg_attn).squeeze()
-                else:
-                    rgb = foreground_rgb + model.bkg_feats.expand(N, H, W, -1, -1) * bkg_attn
-                    bkg_mask = (model.bkg_feats.expand(N, H, W, -1, -1) * bkg_attn).squeeze()
-                rgb = rgb.squeeze(-2)
-            else:
-                rgb = foreground_rgb.squeeze(-2)
-            foreground_rgb = foreground_rgb.squeeze()
         else:
-            rgb = feature_map.squeeze(-2)
+            foreground_rgb = feature_map
+            
+        if model.bkg_feats is not None:
+            bkg_attn = attn[..., topk:, :]
+            bkg_mask = (model.bkg_feats.expand(N, H, W, -1, -1) * bkg_attn).squeeze()
+            if args.models.normalize_topk_attn:
+                rgb = foreground_rgb * (1 - bkg_attn) + model.bkg_feats.expand(N, H, W, -1, -1) * bkg_attn
+            else:
+                rgb = foreground_rgb + model.bkg_feats.expand(N, H, W, -1, -1) * bkg_attn
+            rgb = rgb.squeeze(-2)
+        else:
+            rgb = foreground_rgb.squeeze(-2)
+            bkg_mask = torch.zeros(N, H, W, 1).to(device)
 
         rgb = model.last_act(rgb)
         rgb = torch.clamp(rgb, 0, 1)
@@ -131,7 +131,7 @@ def test_step(frame, num_frames, model, device, dataset, batch, loss_fn, lpips_l
         cur_depth = cur_depth.astype(np.uint16)
         imageio.imwrite(os.path.join(log_dir, "test-{:04d}-predrgb-PSNR{:.3f}-SSIM{:.4f}-LPIPSA{:.4f}-LPIPSV{:.4f}.png".format(frame, test_psnr, test_ssim, test_lpips_alex, test_lpips_vgg)), (rgb.squeeze().detach().cpu().numpy() * 255).astype(np.uint8))
         imageio.imwrite(os.path.join(log_dir, "test-{:04d}-depth-PSNR{:.3f}-SSIM{:.4f}-LPIPSA{:.4f}-LPIPSV{:.4f}.png".format(frame, test_psnr, test_ssim, test_lpips_alex, test_lpips_vgg)), cur_depth)
-        imageio.imwrite(os.path.join(log_dir, "test-{:04d}-fgrgb-PSNR{:.3f}-SSIM{:.4f}-LPIPSA{:.4f}-LPIPSV{:.4f}.png".format(frame, test_psnr, test_ssim, test_lpips_alex, test_lpips_vgg)), (foreground_rgb.clamp(0, 1).detach().cpu().numpy() * 255).astype(np.uint8))
+        imageio.imwrite(os.path.join(log_dir, "test-{:04d}-fgrgb-PSNR{:.3f}-SSIM{:.4f}-LPIPSA{:.4f}-LPIPSV{:.4f}.png".format(frame, test_psnr, test_ssim, test_lpips_alex, test_lpips_vgg)), (foreground_rgb.squeeze().clamp(0, 1).detach().cpu().numpy() * 255).astype(np.uint8))
         imageio.imwrite(os.path.join(log_dir, "test-{:04d}-bkgmask-PSNR{:.3f}-SSIM{:.4f}-LPIPSA{:.4f}-LPIPSV{:.4f}.png".format(frame, test_psnr, test_ssim, test_lpips_alex, test_lpips_vgg)), (bkg_mask.detach().cpu().numpy() * 255).astype(np.uint8))
 
     plots = {}

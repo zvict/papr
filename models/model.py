@@ -545,13 +545,14 @@ class PAPR(nn.Module):
 
             if self.args.models.use_renderer:
                 foreground = self.renderer(fused_features.permute(0, 3, 1, 2), gamma=gamma, beta=beta).permute(0, 2, 3, 1).unsqueeze(-2)   # (N, H, W, 1, 3)
-                if self.args.models.normalize_topk_attn:
-                    rgb = foreground * (1 - bkg_attn) + self.bkg_feats.expand(N, H, W, -1, -1) * bkg_attn
-                else:
-                    rgb = foreground + self.bkg_feats.expand(N, H, W, -1, -1) * bkg_attn
-                rgb = rgb.squeeze(-2)
             else:
-                rgb = fused_features
+                foreground = fused_features.unsqueeze(-2)
+
+            if self.args.models.normalize_topk_attn:
+                rgb = foreground * (1 - bkg_attn) + self.bkg_feats.expand(N, H, W, -1, -1) * bkg_attn
+            else:
+                rgb = foreground + self.bkg_feats.expand(N, H, W, -1, -1) * bkg_attn
+            rgb = rgb.squeeze(-2)
         else:
             attn = F.softmax(scores, dim=3)
             fused_features = torch.sum(embedv * attn, dim=3)   # (N, H, W, C)
