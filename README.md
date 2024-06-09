@@ -98,6 +98,8 @@ To generate images with different exposures controlled by random latent codes, r
 ```
 python exposure_control_test.py --opt configs/t2/Caterpillar_exposure_control.yml --frame 0
 ```
+Note that during testing, the `shading_code_scale` in the config file should be increased to generate images with more diverse exposures.
+
 To generate images by interpolating between two latent codes with different exposures, run:
 ```
 python exposure_control_intrp.py --opt configs/t2/Caterpillar_exposure_control.yml --frame 0 --start_index 0 --end_index 1

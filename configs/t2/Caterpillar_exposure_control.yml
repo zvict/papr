@@ -60,7 +60,7 @@ models:
   last_act: "none"
   normalize_topk_attn: true
   shading_code_dim: 128
-  shading_code_scale: 8.0
+  shading_code_scale: 1.0
   shading_code_num_samples: 20
   shading_code_resample_iter: 10000
   shading_code_resample_size: 100
