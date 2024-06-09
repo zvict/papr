@@ -89,7 +89,7 @@ To load the pretrained models, please put them under `checkpoints/`, and change 
 
 ## Exposure Control
 
-We provide the scripts for the exposure control described in Section 4.4 and Appendix A.8. 
+We provide the scripts for the exposure control described in Section 4.4 and Appendix A.8 in the paper. 
 A pre-trained model is required to finetune with exposure control, by running `train.py` with default configurations.
 To finetune a pre-trained model with exposure control, run:
 ```
