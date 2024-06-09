@@ -90,6 +90,7 @@ To load the pretrained models, please put them under `checkpoints/`, and change 
 ## Exposure Control
 
 We provide the scripts for the exposure control described in Section 4.4 and Appendix A.8. 
+A pre-trained model is required to finetune with exposure control, by running `train.py` with default configurations.
 To finetune a pre-trained model with exposure control, run:
 ```
 python exposure_control_train.py --opt configs/t2/Caterpillar_exposure_control.yml
@@ -98,7 +99,7 @@ To generate images with different exposures controlled by random latent codes, r
 ```
 python exposure_control_test.py --opt configs/t2/Caterpillar_exposure_control.yml --frame 0
 ```
-Note that during testing, the `shading_code_scale` in the config file should be increased to generate images with more diverse exposures.
+Note that during testing, the `shading_code_scale` in the config file should be increased to generate images with more diverse exposures. You may also need to increase the learning rate for the `mapping_mlp` to model more diverse exposures during finetuning.
 
 To generate images by interpolating between two latent codes with different exposures, run:
 ```
