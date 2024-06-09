@@ -3,6 +3,7 @@ data
 .vscode/
 data/
 experiments/
+checkpoints/
 *.pth
 *.pt
 *.out

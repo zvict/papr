@@ -87,5 +87,22 @@ python test.py --opt configs/nerfsyn/chair.yml
 We provide pretrained models on NeRF Synthetic and Tanks&Temples datasets here: [Google Drive](https://drive.google.com/drive/folders/1fTWjuE-I30tBFCshbvC1W0TDdTlM-j82?usp=sharing).
 To load the pretrained models, please put them under `checkpoints/`, and change the `test.load_path` in the config file.
 
+## Exposure Control
+
+We provide the scripts for the exposure control described in Section 4.4 and Appendix A.8. 
+To finetune a pre-trained model with exposure control, run:
+```
+python exposure_control_train.py --opt configs/t2/Caterpillar_exposure_control.yml
+```
+To generate images with different exposures controlled by random latent codes, run:
+```
+python exposure_control_test.py --opt configs/t2/Caterpillar_exposure_control.yml --frame 0
+```
+To generate images by interpolating between two latent codes with different exposures, run:
+```
+python exposure_control_intrp.py --opt configs/t2/Caterpillar_exposure_control.yml --frame 0 --start_index 0 --end_index 1
+```
+We also provide a pre-trained model with exposure control on the Caterpillar scene in the Google Drive link above.
+
 ## Acknowledgement
 This research was enabled in part by support provided by NSERC, the BC DRI Group and the Digital Research Alliance of Canada.
