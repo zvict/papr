@@ -1,4 +1,4 @@
-index: "Caterpillar_exposure_control"
+index: "Caterpillar_exposure_control3"
 load_path: "./checkpoints/Caterpillar.pth"
 # load_path: ""
 save_dir: "./experiments"
@@ -60,10 +60,10 @@ models:
   last_act: "none"
   normalize_topk_attn: true
   shading_code_dim: 128
-  shading_code_scale: 1.0
+  shading_code_scale: 1.0 # use 8.0 for random generation
   shading_code_num_samples: 20
   shading_code_resample_iter: 10000
-  shading_code_resample_size: 100
+  shading_code_resample_size: 200
   shading_code_resample_select_by: "psnr"
   mapping_mlp:
     use: true
@@ -82,9 +82,9 @@ models:
     embed:
       embed_type: 1
       share_embed: false
-      k_L: [6, 6, 6]
-      q_L: [6]
-      v_L: [6, 6]
+      k_L: [4, 4, 4]
+      q_L: [4]
+      v_L: [4, 4]
       dropout: 0.0
       temperature: 1.0
       pe_factor: 2.0
@@ -278,8 +278,8 @@ eval:
   save_fig: true
 test:
   # load_path: "checkpoints/Caterpillar.pth"
-  load_path: "checkpoints/Caterpillar_exposure_control.pth"
-  # load_path: ""
+  # load_path: "checkpoints/Caterpillar_exposure_control.pth"
+  load_path: ""
   save_fig: true
   save_video: false
   max_height: 100

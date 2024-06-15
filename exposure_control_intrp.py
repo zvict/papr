@@ -46,8 +46,11 @@ def parse_args():
     parser.add_argument('--resample', action='store_true', help='[Exposure control] Resample the latent code')
     parser.add_argument('--seed', type=int, default=1, help='[Exposure control] Random seed')
     parser.add_argument('--frame', type=int, default=0, help='[Exposure control] Test frame index')
+    parser.add_argument('--scale', type=float, default=1.0, help='[Exposure control] Shading code scale')
+    parser.add_argument('--num_samples', type=int, default=20, help='[Exposure control] Number of samples for random exposure control')
     parser.add_argument('--start_index', type=int, default=0, help='[Exposure control] Interpolation start index')
     parser.add_argument('--end_index', type=int, default=1, help='[Exposure control] Interpolation end index')
+    parser.add_argument('--num_intrp', type=int, default=10, help='[Exposure control] Number of interpolations')
     return parser.parse_args()
 
 
@@ -277,7 +280,7 @@ def resample_shading_codes(shading_codes, args, model, dataset, img_id, loss_fn,
     del eval_loss
 
 
-def test(model, device, dataset, save_name, args, resume_step, resample, shading_codes, test_frame, seed, ids):
+def test(model, device, dataset, save_name, args, resume_step, resample, shading_codes, test_frame, seed, ids, cur_scale, num_interpolations, num_samples):
     testloader = get_loader(dataset, args.dataset, mode="test")
     print("testloader:", testloader)
 
@@ -297,15 +300,14 @@ def test(model, device, dataset, save_name, args, resume_step, resample, shading
 
     # ids = [10, 11]  
     latent_codes = []
-    for i in range(20):
+    for i in range(num_samples):
         print("test seed:", seed, "i:", i)
-        shading_codes = torch.randn(1, args.models.shading_code_dim, device=device) * args.models.shading_code_scale
+        shading_codes = torch.randn(1, args.models.shading_code_dim, device=device) * cur_scale
 
         if i in ids:
             latent_codes.append(shading_codes)
 
     interpolated_codes = []
-    num_interpolations = 10
     for j in range(num_interpolations):
         interpolated_codes.append(latent_codes[0] + (latent_codes[1] - latent_codes[0]) * (j + 1) / num_interpolations)
 
@@ -315,7 +317,7 @@ def test(model, device, dataset, save_name, args, resume_step, resample, shading
             continue
 
         for i in range(num_interpolations):
-            print("test seed:", seed, "i:", i)
+            # print("test seed:", seed, "i:", i)
             # shading_codes = torch.randn(1, args.models.shading_code_dim, device=device) * args.models.shading_code_scale
             shading_codes = interpolated_codes[i]
             plots = test_step(frame, len(testloader), model, device, dataset, batch, loss_fn, lpips_loss_fn_alex,
@@ -347,7 +349,7 @@ def test(model, device, dataset, save_name, args, resume_step, resample, shading
     print(f"Avg test loss: {test_loss:.4f}, test PSNR: {test_psnr:.4f}, test SSIM: {test_ssim:.4f}, test LPIPS Alex: {test_lpips_alex:.4f}, test LPIPS VGG: {test_lpips_vgg:.4f}")
 
 
-def main(args, save_name, mode, resume_step=0, resample=False, frame=0, seed=0, ids=[0, 1]):
+def main(args, save_name, mode, resume_step=0, resample=False, frame=0, seed=0, cur_scale=1.0, num_interpolations=10, num_samples=20, ids=[0, 1]):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = get_model(args, device)
     dataset = get_dataset(args.dataset, mode=mode)
@@ -395,7 +397,7 @@ def main(args, save_name, mode, resume_step=0, resample=False, frame=0, seed=0, 
     else:
         raise NotImplementedError
 
-    test(model, device, dataset, save_name, args, resume_step, resample, shading_codes, frame, seed, ids)
+    test(model, device, dataset, save_name, args, resume_step, resample, shading_codes, frame, seed, ids, cur_scale, num_interpolations, num_samples)
 
 
 if __name__ == '__main__':
@@ -404,8 +406,11 @@ if __name__ == '__main__':
     seed = args.seed
     frame = args.frame
     resample = args.resample
+    scale = args.scale
+    num_samples = args.num_samples
     start_index = args.start_index
     end_index = args.end_index  # Interpolate between these two shading codes
+    num_interpolations = args.num_intrp
     with open(args.opt, 'r') as f:
         config = yaml.safe_load(f)
 
@@ -430,7 +435,9 @@ if __name__ == '__main__':
         config['dataset'].update(dataset)
         args = DictAsMember(config)
 
+        cur_scale = args.models.shading_code_scale if scale == 1.0 else scale
+
         assert args.models.use_renderer, "Currently only support using renderer for exposure control"
         assert args.models.mapping_mlp.use, "Mapping MLP must be used for exposure control"
 
-        main(args, name, mode, resume_step, resample, frame, seed, ids=[start_index, end_index])
+        main(args, name, mode, resume_step, resample, frame, seed, cur_scale, num_interpolations, num_samples, ids=[start_index, end_index])

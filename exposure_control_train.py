@@ -224,6 +224,7 @@ def resample_shading_codes(shading_codes, args, model, dataset, img_id, loss_fn,
             cur_affine = model.mapping_mlp(cur_shading_code)
             cur_affine_dim = cur_affine.shape[-1]
             cur_gamma, cur_beta = cur_affine[:cur_affine_dim // 2], cur_affine[cur_affine_dim // 2:]
+            # print(cur_shading_code.min().item(), cur_shading_code.max().item(), cur_gamma.min().item(), cur_gamma.max().item(), cur_beta.min().item(), cur_beta.max().item())
             
             foreground_rgb = model.renderer(feature_map.squeeze(-2).permute(0, 3, 1, 2), gamma=cur_gamma, beta=cur_beta).permute(0, 2, 3, 1).unsqueeze(-2)   # (N, H, W, 1, 3)
 
@@ -313,8 +314,8 @@ def train_and_eval(start_step, model, device, dataset, eval_dataset, sample_data
     # model.register_buffer("eval_shading_codes", eval_shading_codes)
     model.train_shading_codes = nn.Parameter(torch.randn(len(dataset), args.models.shading_code_dim, device=device) * args.models.shading_code_scale, requires_grad=False)
     model.eval_shading_codes = nn.Parameter(torch.randn(len(eval_dataset), args.models.shading_code_dim, device=device) * args.models.shading_code_scale, requires_grad=False)
-    print("!!!!! train_shading_codes:", model.train_shading_codes.shape)
-    print("!!!!! eval_shading_codes:", model.eval_shading_codes.shape)
+    print("!!!!! train_shading_codes:", model.train_shading_codes.shape, model.train_shading_codes.min(), model.train_shading_codes.max())
+    print("!!!!! eval_shading_codes:", model.eval_shading_codes.shape, model.eval_shading_codes.min(), model.eval_shading_codes.max())
 
     print("Start step:", start_step, "Total steps:", args.training.steps)
     start_time = time.time()
@@ -380,6 +381,7 @@ def train_and_eval(start_step, model, device, dataset, eval_dataset, sample_data
             if step % 200 == 0:
                 time_used = time.time() - start_time
                 print("Train step:", step, "loss:", loss, "tx_lr:", model.tx_lr, "pts_lr:", model.pts_lr, "scale:", model.scaler.get_scale(), f"time: {time_used:.2f}s")
+                print(model.mapping_mlp.model.model[7].weight[0, :5])
                 start_time = time.time()
 
             if (step % args.eval.step == 0) or (step % 500 == 0 and step < 10000):

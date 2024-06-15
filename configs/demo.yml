@@ -45,9 +45,10 @@ geoms:
     add_sample_k: 10  # number of points to consider when measuring sparsity or ...
   background:
     learnable: false  # learn the background feature or not
-    init_type: "ones"
+    init_type: "ones" # initialize the background feature as ones or zeros, if background is white, then use ones
+    # color: [1.0, 1.0, 1.0]  # background color, normalized by 255
     init_scale: 1.0
-    seq_len: 1  # sequence length of the background feature
+    # seq_len: 1  # sequence length of the background feature
     constant: 5.0 # constant background score
   point_feats:
     dim: 64 # dimension of the point features

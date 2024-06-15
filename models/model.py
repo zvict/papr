@@ -508,6 +508,9 @@ class PAPR(nn.Module):
             affine = self.mapping_mlp(shading_code)
             affine_dim = affine.shape[-1]
             gamma, beta = affine[:affine_dim//2], affine[affine_dim//2:]
+        
+        if step % 200 == 0:
+            print(shading_code.min().item(), shading_code.max().item(), gamma.min().item(), gamma.max().item(), beta.min().item(), beta.max().item())
 
         points, select_k_ind = self._get_points(rays_o, rays_d, c2w, step)
         key, query, value, k_extra, q_extra, v_extra = self._get_kqv(rays_o, rays_d, points, c2w, select_k_ind, step)

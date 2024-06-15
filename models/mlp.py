@@ -40,6 +40,10 @@ class MLP(nn.Module):
         assert len(layers) == 2 * num_layers + 1
         self.model = nn.ModuleList(layers)
 
+        for p in self.model.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+
     def forward(self, x, residuals=[]):
         skip_layers = [i*2+1 for i in self.skip_layers]
         residual_layers = [i*2+1 for i in self.residual_layers]

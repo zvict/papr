@@ -43,17 +43,26 @@ def parse_args():
     parser = argparse.ArgumentParser(description="PAPR")
     parser.add_argument('--opt', type=str, default="", help='Option file path')
     parser.add_argument('--resume', type=int, default=250000, help='Resume step')
-    parser.add_argument('--resample', action='store_true', help='Resample shading codes')
+    parser.add_argument('--resample', action='store_true', help='[Exposure control] Resample the latent code')
+    parser.add_argument('--seed', type=int, default=1, help='[Exposure control] Random seed')
+    parser.add_argument('--frame', type=int, default=0, help='[Exposure control] Test frame index')
+    parser.add_argument('--scale', type=float, default=1.0, help='[Exposure control] Shading code scale')
+    parser.add_argument('--num_samples', type=int, default=20, help='[Exposure control] Number of samples for random exposure control')
     return parser.parse_args()
 
 
-def test_step(frame, num_frames, model, device, dataset, batch, loss_fn, lpips_loss_fn_alex, lpips_loss_fn_vgg, args, test_losses, test_psnrs, test_ssims, test_lpips_alexs, test_lpips_vggs, resume_step, resample, cur_shading_code):
+def test_step(frame, num_frames, model, device, dataset, batch, loss_fn, lpips_loss_fn_alex, lpips_loss_fn_vgg, args, test_losses, test_psnrs, test_ssims, test_lpips_alexs, test_lpips_vggs, resume_step, resample, shading_codes, seed, i, scale):
     idx, _, img, rayd, rayo = batch
     c2w = dataset.get_c2w(idx.squeeze())
 
-    if resample:
-        print("Resampling shading codes")
-        cur_shading_code = resample_shading_codes(cur_shading_code[None, ...], args, model, dataset, 0, loss_fn, resume_step, full_img=True).squeeze(0)
+    if resample == False:
+        cur_shading_code = shading_codes[0]
+        # cur_shading_code = torch.randn(args.models.shading_code_dim, device=device) * args.models.shading_code_scale
+    else:
+        print("Before resample shading codes, eval shading codes mean: ", shading_codes[idx].mean(), shading_codes[idx].shape, shading_codes.shape)
+        resample_shading_codes(shading_codes, args, model, dataset, idx, loss_fn, resume_step, scale)
+        print("After resample shading codes, eval shading codes mean: ", shading_codes[idx].mean(), shading_codes[idx].shape, shading_codes.shape)
+        cur_shading_code = shading_codes[idx].squeeze()
 
     N, H, W, _ = rayd.shape
     num_pts, _ = model.points.shape
@@ -131,7 +140,7 @@ def test_step(frame, num_frames, model, device, dataset, batch, loss_fn, lpips_l
 
     if args.test.save_fig:
         # To save the rendered images, depth maps, foreground rgb, and background mask
-        log_dir = os.path.join(args.save_dir, args.index, 'test', f'exposure_control_test_resample{resample}')
+        log_dir = os.path.join(args.save_dir, args.index, 'test', f'exposure_control_random_resample{resample}_seed{seed}_std{scale}')
         os.makedirs(log_dir, exist_ok=True)
         cur_depth /= args.dataset.coord_scale
         cur_depth *= (65536 / 10)
@@ -143,43 +152,43 @@ def test_step(frame, num_frames, model, device, dataset, batch, loss_fn, lpips_l
 
     plots = {}
 
-    if args.test.save_video:
-        # To save the rendered videos
-        coord_scale = args.dataset.coord_scale
-        if "Barn" in args.dataset.path:
-            coord_scale *= 1.5
-        if "Family" in args.dataset.path:
-            coord_scale *= 0.5
-        pt_plot_scale = 1.0 * coord_scale
+    # if args.test.save_video:
+    #     # To save the rendered videos
+    #     coord_scale = args.dataset.coord_scale
+    #     if "Barn" in args.dataset.path:
+    #         coord_scale *= 1.5
+    #     if "Family" in args.dataset.path:
+    #         coord_scale *= 0.5
+    #     pt_plot_scale = 1.0 * coord_scale
 
-        plot_opt = args.test.plots
-        th = -frame * (360. / num_frames)
-        azims = np.linspace(180, -180, num_frames)
-        azmin = azims[frame]
+    #     plot_opt = args.test.plots
+    #     th = -frame * (360. / num_frames)
+    #     azims = np.linspace(180, -180, num_frames)
+    #     azmin = azims[frame]
 
-        points_np = model.points.detach().cpu().numpy()
-        rgb_pred_np = rgb.squeeze().detach().cpu().numpy().astype(np.float32)
-        rgb_gt_np = img.squeeze().detach().cpu().numpy().astype(np.float32)
-        points_influ_scores_np = None
-        if model.points_influ_scores is not None:
-            points_influ_scores_np = model.points_influ_scores.squeeze().detach().cpu().numpy()
+    #     points_np = model.points.detach().cpu().numpy()
+    #     rgb_pred_np = rgb.squeeze().detach().cpu().numpy().astype(np.float32)
+    #     rgb_gt_np = img.squeeze().detach().cpu().numpy().astype(np.float32)
+    #     points_influ_scores_np = None
+    #     if model.points_influ_scores is not None:
+    #         points_influ_scores_np = model.points_influ_scores.squeeze().detach().cpu().numpy()
 
-        if plot_opt.pcrgb:
-            pcrgb_plot = get_test_pcrgb(frame, th, azmin, test_psnr, points_np,
-                                        rgb_pred_np, rgb_gt_np, depth_np, pt_plot_scale, points_influ_scores_np)
-            plots["pcrgb"] = pcrgb_plot
+    #     if plot_opt.pcrgb:
+    #         pcrgb_plot = get_test_pcrgb(frame, th, azmin, test_psnr, points_np,
+    #                                     rgb_pred_np, rgb_gt_np, depth_np, pt_plot_scale, points_influ_scores_np)
+    #         plots["pcrgb"] = pcrgb_plot
 
-        if plot_opt.featattn:   # Note that these plots are not necessarily meaningful since each ray has different top K points
-            featmap_np = feature_map[0].squeeze().detach().cpu().numpy().astype(np.float32)
-            attn_np = attn[0].squeeze().detach().cpu().numpy().astype(np.float32)
-            featattn_plot = get_test_featmap_attn(frame, th, points_np, rgb_pred_np, rgb_gt_np,
-                                pt_plot_scale, featmap_np, attn_np, points_influ_scores_np)
-            plots["featattn"] = featattn_plot
+    #     if plot_opt.featattn:   # Note that these plots are not necessarily meaningful since each ray has different top K points
+    #         featmap_np = feature_map[0].squeeze().detach().cpu().numpy().astype(np.float32)
+    #         attn_np = attn[0].squeeze().detach().cpu().numpy().astype(np.float32)
+    #         featattn_plot = get_test_featmap_attn(frame, th, points_np, rgb_pred_np, rgb_gt_np,
+    #                             pt_plot_scale, featmap_np, attn_np, points_influ_scores_np)
+    #         plots["featattn"] = featattn_plot
 
     return plots
 
 
-def resample_shading_codes(shading_codes, args, model, dataset, img_id, loss_fn, step, full_img=False):
+def resample_shading_codes(shading_codes, args, model, dataset, img_id, loss_fn, step, full_img=False, scale=1.0):
     if full_img == True:
         img, rayd, rayo = dataset.get_full_img(img_id)
         c2w = dataset.get_c2w(img_id)
@@ -190,7 +199,7 @@ def resample_shading_codes(shading_codes, args, model, dataset, img_id, loss_fn,
         rayd = torch.from_numpy(rayd).unsqueeze(0)
         rayo = torch.from_numpy(rayo).unsqueeze(0)
 
-    sampled_shading_codes = torch.randn(args.models.shading_code_num_samples, args.models.shading_code_dim, device=model.device) * args.models.shading_code_scale
+    sampled_shading_codes = torch.randn(args.models.shading_code_num_samples, args.models.shading_code_dim, device=model.device) * scale
     
     N, H, W, _ = rayd.shape
     num_pts, _ = model.points.shape
@@ -267,10 +276,8 @@ def resample_shading_codes(shading_codes, args, model, dataset, img_id, loss_fn,
     del rayo, rayd, img, c2w, attn
     del eval_loss
 
-    return shading_codes
 
-
-def test(model, device, dataset, save_name, args, resume_step, resample, shading_codes):
+def test(model, device, dataset, save_name, args, resume_step, resample, shading_codes, test_frame, seed, scale, num_samples):
     testloader = get_loader(dataset, args.dataset, mode="test")
     print("testloader:", testloader)
 
@@ -290,16 +297,21 @@ def test(model, device, dataset, save_name, args, resume_step, resample, shading
 
     frames = {}
     for frame, batch in enumerate(testloader):
-        cur_shading_code = shading_codes[frame]
-        plots = test_step(frame, len(testloader), model, device, dataset, batch, loss_fn, lpips_loss_fn_alex,
-                        lpips_loss_fn_vgg, args, test_losses, test_psnrs, test_ssims, test_lpips_alexs, 
-                        test_lpips_vggs, resume_step, resample, cur_shading_code)
+        if frame != test_frame:
+            continue
 
-        if plots:
-            for key, value in plots.items():
-                if key not in frames:
-                    frames[key] = []
-                frames[key].append(value)
+        for i in range(num_samples):
+            print("test seed:", seed, "i:", i)
+            shading_codes = torch.randn(1, args.models.shading_code_dim, device=device) * scale
+            plots = test_step(frame, len(testloader), model, device, dataset, batch, loss_fn, lpips_loss_fn_alex,
+                            lpips_loss_fn_vgg, args, test_losses, test_psnrs, test_ssims, test_lpips_alexs, 
+                            test_lpips_vggs, resume_step, resample, shading_codes, seed, i, scale)
+
+            # if plots:
+            #     for key, value in plots.items():
+            #         if key not in frames:
+            #             frames[key] = []
+            #         frames[key].append(value)
 
     test_loss = np.mean(test_losses)
     test_psnr = np.mean(test_psnrs)
@@ -307,20 +319,20 @@ def test(model, device, dataset, save_name, args, resume_step, resample, shading
     test_lpips_alex = np.mean(test_lpips_alexs)
     test_lpips_vgg = np.mean(test_lpips_vggs)
 
-    if frames:
-        for key, value in frames.items():
-            name = f"{args.index}-PSNR{test_psnr:.3f}-SSIM{test_ssim:.4f}-LPIPSA{test_lpips_alex:.4f}-LPIPSV{test_lpips_vgg:.4f}-{key}-{save_name}-step{resume_step}.mp4"
-            # In case the name is too long
-            name = name[-255:] if len(name) > 255 else name
-            log_dir = os.path.join(args.save_dir, args.index, 'test', 'videos')
-            os.makedirs(log_dir, exist_ok=True)
-            f = os.path.join(log_dir, name)
-            imageio.mimwrite(f, value, fps=30, quality=10)
+    # if frames:
+    #     for key, value in frames.items():
+    #         name = f"{args.index}-PSNR{test_psnr:.3f}-SSIM{test_ssim:.4f}-LPIPSA{test_lpips_alex:.4f}-LPIPSV{test_lpips_vgg:.4f}-{key}-{save_name}-step{resume_step}.mp4"
+    #         # In case the name is too long
+    #         name = name[-255:] if len(name) > 255 else name
+    #         log_dir = os.path.join(args.save_dir, args.index, 'test', 'videos')
+    #         os.makedirs(log_dir, exist_ok=True)
+    #         f = os.path.join(log_dir, name)
+    #         imageio.mimwrite(f, value, fps=30, quality=10)
 
     print(f"Avg test loss: {test_loss:.4f}, test PSNR: {test_psnr:.4f}, test SSIM: {test_ssim:.4f}, test LPIPS Alex: {test_lpips_alex:.4f}, test LPIPS VGG: {test_lpips_vgg:.4f}")
 
 
-def main(args, save_name, mode, resume_step=0, resample=False):
+def main(args, save_name, mode, resume_step=0, resample=False, frame=0, seed=0, scale=1.0, num_samples=1):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = get_model(args, device)
     dataset = get_dataset(args.dataset, mode=mode)
@@ -368,13 +380,17 @@ def main(args, save_name, mode, resume_step=0, resample=False):
     else:
         raise NotImplementedError
 
-    test(model, device, dataset, save_name, args, resume_step, resample, shading_codes)
+    test(model, device, dataset, save_name, args, resume_step, resample, shading_codes, frame, seed, scale, num_samples)
 
 
 if __name__ == '__main__':
 
     args = parse_args()
+    seed = args.seed
+    frame = args.frame
     resample = args.resample
+    scale = args.scale
+    num_samples = args.num_samples
     with open(args.opt, 'r') as f:
         config = yaml.safe_load(f)
 
@@ -389,7 +405,8 @@ if __name__ == '__main__':
     shutil.copyfile(__file__, os.path.join(log_dir, os.path.basename(__file__)))
     shutil.copyfile(args.opt, os.path.join(log_dir, os.path.basename(args.opt)))
 
-    setup_seed(config['seed'])
+    # setup_seed(config['seed'])
+    setup_seed(seed)
 
     for i, dataset in enumerate(config['test']['datasets']):
         name = dataset['name']
@@ -398,7 +415,10 @@ if __name__ == '__main__':
         config['dataset'].update(dataset)
         args = DictAsMember(config)
 
+        cur_scale = args.models.shading_code_scale if scale == 1.0 else scale
+        print("Using shading code scale:", cur_scale)
+
         assert args.models.use_renderer, "Currently only support using renderer for exposure control"
         assert args.models.mapping_mlp.use, "Mapping MLP must be used for exposure control"
 
-        main(args, name, mode, resume_step, resample)
+        main(args, name, mode, resume_step, resample, frame, seed, cur_scale, num_samples)

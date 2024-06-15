@@ -213,6 +213,7 @@ class SmallUNet(nn.Module):
             if self.affine_layer == 0:
                 B, C, H, W = x.shape
                 assert gamma.shape == (C,) and beta.shape == (C,)
+                # print(gamma.mean(), beta.mean())
                 x = x * gamma.reshape(1, C, 1, 1) + beta.reshape(1, C, 1, 1)
 
             x1 = self.inc(x)

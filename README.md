@@ -68,6 +68,10 @@ Download NeRF Synthetic Dataset from [here](https://drive.google.com/drive/folde
 Download [Tanks&Temples](https://www.tanksandtemples.org/) from [here](https://dl.fbaipublicfiles.com/nsvf/dataset/TanksAndTemple.zip) and put it under:
 `data/tanks_temples/`
 
+#### Use your own data
+
+
+
 ## Overview
 
 The codebase has two main components: data loading part in `dataset/` and models in `models/`. Class `PAPR` in `models/model.py` defines our main model. All the configurations are in `configs/`, and `configs/demo.yml` is a demo configuration with comments of important arguments.
