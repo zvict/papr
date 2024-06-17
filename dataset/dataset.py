@@ -3,6 +3,7 @@ from torch.utils.data import Dataset
 import numpy as np
 import imageio
 from PIL import Image
+from copy import deepcopy
 from .utils import load_meta_data, get_rays, extract_patches
 
 
@@ -11,8 +12,7 @@ class RINDataset(Dataset):
 
     def __init__(self, args, mode='train'):
         self.args = args
-        images, c2w, H, W, focal_x, focal_y, image_paths = load_meta_data(
-            args, mode=mode)
+        images, c2w, H, W, focal_x, focal_y, image_paths = load_meta_data(args, mode=mode)
         num_imgs = len(image_paths)
 
         self.num_imgs = num_imgs
@@ -39,8 +39,7 @@ class RINDataset(Dataset):
             self.rayo = rays_o      # (N, 3)
 
         if self.args.extract_patch == True and self.args.extract_online == False and self.args.read_offline == True:
-            img_patches, rayd_patches, rayo_patches, num_patches = extract_patches(
-                images, rays_o, rays_d, args)
+            img_patches, rayd_patches, rayo_patches, num_patches = extract_patches(images, rays_o, rays_d, args)
             # (N, n_patches, patch_height, patch_width, C) or None
             self.img_patches = img_patches
             # (N, n_patches, patch_height, patch_width, 3)
@@ -63,8 +62,7 @@ class RINDataset(Dataset):
 
         image = torch.from_numpy(image).float()
 
-        rayo, rayd = get_rays(self.H, self.W, self.focal_x, self.focal_y,
-                              self.c2w[image_idx:image_idx+1])
+        rayo, rayd = get_rays(self.H, self.W, self.focal_x, self.focal_y, self.c2w[image_idx:image_idx+1])
 
         return image, rayo, rayd
 
@@ -87,7 +85,6 @@ class RINDataset(Dataset):
             img_idx = idx
             args = self.args
             args.patches.max_patches = 1
-            args.patches.type = 'random'
             if self.args.read_offline:
                 img_patches, rayd_patches, rayo_patches, _ = extract_patches(self.images[img_idx:img_idx+1],
                                                                              self.rayo[img_idx:img_idx+1],
@@ -95,8 +92,7 @@ class RINDataset(Dataset):
                                                                              args)
             else:
                 image, rayo, rayd = self._read_image_from_path(img_idx)
-                img_patches, rayd_patches, rayo_patches, _ = extract_patches(
-                    image[None, ...], rayo, rayd, args)
+                img_patches, rayd_patches, rayo_patches, _ = extract_patches(image[None, ...], rayo, rayd, args)
 
             return img_idx, 0, \
                 img_patches[0, 0] if img_patches is not None else 0, \
@@ -113,8 +109,7 @@ class RINDataset(Dataset):
     def get_full_img(self, img_idx):
         if self.args.read_offline:
             return self.images[img_idx].unsqueeze(0) if self.images is not None else None, \
-                self.rayd[img_idx].unsqueeze(
-                    0), self.rayo[img_idx].unsqueeze(0)
+                self.rayd[img_idx].unsqueeze(0), self.rayo[img_idx].unsqueeze(0)
         else:
             image, rayo, rayd = self._read_image_from_path(img_idx)
             return image[None, ...], rayd, rayo

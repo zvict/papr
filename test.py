@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import random
 import sys
-from logger import *
+from utils import *
 from dataset import get_dataset, get_loader
 from models import get_model, get_loss
 import lpips
@@ -21,21 +21,6 @@ except:
 
     def compare_ssim(gt, img, win_size, channel_axis=2):
         return structural_similarity(gt, img, win_size=win_size, channel_axis=channel_axis, data_range=1.0)
-
-
-class DictAsMember(dict):
-    def __getattr__(self, name):
-        value = self[name]
-        if isinstance(value, dict):
-            value = DictAsMember(value)
-        return value
-
-
-def setup_seed(seed):
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed)
-    random.seed(seed)
 
 
 def parse_args():
@@ -62,8 +47,8 @@ def test_step(frame, num_frames, model, device, dataset, batch, loss_fn, lpips_l
     selected_points = torch.zeros(1, H, W, topk, 3)
 
     bkg_seq_len_attn = 0
-    tx_opt = args.models.transformer
-    feat_dim = tx_opt.embed.d_ff_out if tx_opt.embed.share_embed else tx_opt.embed.value.d_ff_out
+    attn_opt = args.models.attn
+    feat_dim = attn_opt.embed.value.d_ff_out
     if model.bkg_feats is not None:
         bkg_seq_len_attn = model.bkg_feats.shape[0]
     feature_map = torch.zeros(N, H, W, 1, feat_dim).to(device)
@@ -255,13 +240,19 @@ def main(args, save_name, mode, resume_step=0):
 
 if __name__ == '__main__':
 
+    with open("configs/default.yml", 'r') as f:
+        default_config = yaml.safe_load(f)
+
     args = parse_args()
     with open(args.opt, 'r') as f:
         config = yaml.safe_load(f)
 
+    test_config = copy.deepcopy(default_config)
+    update_dict(test_config, config)
+
     resume_step = args.resume
 
-    log_dir = os.path.join(config["save_dir"], config['index'])
+    log_dir = os.path.join(test_config["save_dir"], test_config['index'])
     os.makedirs(log_dir, exist_ok=True)
 
     sys.stdout = Logger(os.path.join(log_dir, 'test.log'), sys.stdout)
@@ -270,12 +261,12 @@ if __name__ == '__main__':
     shutil.copyfile(__file__, os.path.join(log_dir, os.path.basename(__file__)))
     shutil.copyfile(args.opt, os.path.join(log_dir, os.path.basename(args.opt)))
 
-    setup_seed(config['seed'])
+    setup_seed(test_config['seed'])
 
-    for i, dataset in enumerate(config['test']['datasets']):
+    for i, dataset in enumerate(test_config['test']['datasets']):
         name = dataset['name']
         mode = dataset['mode']
         print(name, dataset)
-        config['dataset'].update(dataset)
-        args = DictAsMember(config)
+        test_config['dataset'].update(dataset)
+        args = DictAsMember(test_config)
         main(args, name, mode, resume_step)

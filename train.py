@@ -14,24 +14,9 @@ import sys
 import io
 import imageio
 from PIL import Image
-from logger import *
+from utils import *
 from dataset import get_dataset, get_loader
 from models import get_model, get_loss
-
-
-class DictAsMember(dict):
-    def __getattr__(self, name):
-        value = self[name]
-        if isinstance(value, dict):
-            value = DictAsMember(value)
-        return value
-
-
-def setup_seed(seed):
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed)
-    random.seed(seed)
 
 
 def parse_args():
@@ -41,7 +26,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def eval_step(steps, model, device, dataset, eval_dataset, batch, loss_fn, train_out, args, train_losses, eval_losses, eval_psnrs, pt_lrs, tx_lrs):
+def eval_step(steps, model, device, dataset, eval_dataset, batch, loss_fn, train_out, args, train_losses, eval_losses, eval_psnrs, pt_lrs, attn_lrs):
     step = steps[-1]
     train_img_idx, _, train_patch, _, _  = batch
     train_img, train_rayd, train_rayo = dataset.get_full_img(train_img_idx[0])
@@ -61,8 +46,8 @@ def eval_step(steps, model, device, dataset, eval_dataset, batch, loss_fn, train
     selected_points = torch.zeros(1, H, W, topk, 3)
 
     bkg_seq_len_attn = 0
-    tx_opt = args.models.transformer
-    feat_dim = tx_opt.embed.d_ff_out if tx_opt.embed.share_embed else tx_opt.embed.value.d_ff_out
+    attn_opt = args.models.attn
+    feat_dim = attn_opt.embed.value.d_ff_out
     if model.bkg_feats is not None:
         bkg_seq_len_attn = model.bkg_feats.shape[0]
     feature_map = torch.zeros(N, H, W, 1, feat_dim).to(device)
@@ -141,7 +126,7 @@ def eval_step(steps, model, device, dataset, eval_dataset, batch, loss_fn, train
 
         # main plot
         main_plot = get_training_main_plot(args.index, steps, train_tgt_rgb, train_tgt_patch, train_pred_patch, test_tgt_rgb, test_pred_rgb, train_losses, 
-                                           eval_losses, points_np, pt_plot_scale, depth, pt_lrs, tx_lrs, eval_psnrs, points_influ_scores_np)
+                                           eval_losses, points_np, pt_plot_scale, depth, pt_lrs, attn_lrs, eval_psnrs, points_influ_scores_np)
         save_name = os.path.join(log_dir, "train_main_plots", "%s_iter_%d.png" % (args.index, step))
         main_plot.save(save_name)
 
@@ -200,7 +185,7 @@ def train_and_eval(start_step, model, device, dataset, eval_dataset, losses, arg
     steps = []
     train_losses, eval_losses, eval_psnrs = losses
     pt_lrs = []
-    tx_lrs = []
+    attn_lrs = []
 
     avg_train_loss = 0.
     step = start_step
@@ -264,15 +249,15 @@ def train_and_eval(start_step, model, device, dataset, eval_dataset, losses, arg
             
             if step % 200 == 0:
                 time_used = time.time() - start_time
-                print("Train step:", step, "loss:", loss, "tx_lr:", model.tx_lr, "pts_lr:", model.pts_lr, "scale:", model.scaler.get_scale(), f"time: {time_used:.2f}s")
+                print("Train step:", step, "loss:", loss, "attn_lr:", model.attn_lr, "pts_lr:", model.pts_lr, "scale:", model.scaler.get_scale(), f"time: {time_used:.2f}s")
                 start_time = time.time()
 
             if (step % args.eval.step == 0) or (step % 500 == 0 and step < 10000):
                 train_losses.append(avg_train_loss / eval_step_cnt)
                 pt_lrs.append(model.pts_lr)
-                tx_lrs.append(model.tx_lr)
+                attn_lrs.append(model.attn_lr)
                 steps.append(step)
-                eval_step(steps, model, device, dataset, eval_dataset, batch, loss_fn, out, args, train_losses, eval_losses, eval_psnrs, pt_lrs, tx_lrs)
+                eval_step(steps, model, device, dataset, eval_dataset, batch, loss_fn, out, args, train_losses, eval_losses, eval_psnrs, pt_lrs, attn_lrs)
                 avg_train_loss = 0.
                 eval_step_cnt = 0
 
@@ -316,8 +301,8 @@ def main(args, eval_args, resume):
     eval_dataset = get_dataset(eval_args.dataset, mode="test")
     model = model.to(device)
 
-    if torch.__version__ >= "2.0":
-        model = torch.compile(model)
+    # if torch.__version__ >= "2.0":
+    #     model = torch.compile(model)
 
     start_step = 0
     losses = [[], [], []]
@@ -346,15 +331,22 @@ def main(args, eval_args, resume):
 
 if __name__ == '__main__':
 
+    with open("configs/default.yml", 'r') as f:
+        default_config = yaml.safe_load(f)
+
     args = parse_args()
     with open(args.opt, 'r') as f:
         config = yaml.safe_load(f)
-    eval_config = copy.deepcopy(config)
+
+    train_config = copy.deepcopy(default_config)
+    update_dict(train_config, config)
+
+    eval_config = copy.deepcopy(train_config)
     eval_config['dataset'].update(eval_config['eval']['dataset'])
     eval_config = DictAsMember(eval_config)
-    config = DictAsMember(config)
+    train_config = DictAsMember(train_config)
 
-    log_dir = os.path.join(config.save_dir, config.index)
+    log_dir = os.path.join(train_config.save_dir, train_config.index)
     os.makedirs(log_dir, exist_ok=True)
 
     sys.stdout = Logger(os.path.join(log_dir, 'train.log'), sys.stdout)
@@ -365,6 +357,6 @@ if __name__ == '__main__':
 
     find_all_python_files_and_zip(".", os.path.join(log_dir, "code.zip"))
 
-    setup_seed(config.seed)
+    setup_seed(train_config.seed)
 
-    main(config, eval_config, args.resume)
+    main(train_config, eval_config, args.resume)

@@ -16,7 +16,7 @@ import io
 import imageio
 from tqdm import tqdm
 from PIL import Image
-from logger import *
+from utils import *
 from dataset import get_dataset, get_loader
 from models import get_model, get_loss
 
@@ -43,7 +43,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def eval_step(steps, model, device, dataset, eval_dataset, batch, loss_fn, train_out, args, train_losses, eval_losses, eval_psnrs, pt_lrs, tx_lrs):
+def eval_step(steps, model, device, dataset, eval_dataset, batch, loss_fn, train_out, args, train_losses, eval_losses, eval_psnrs, pt_lrs, attn_lrs):
     step = steps[-1]
     train_img_idx, _, train_patch, _, _  = batch
     train_img, train_rayd, train_rayo = dataset.get_full_img(train_img_idx[0])
@@ -67,8 +67,7 @@ def eval_step(steps, model, device, dataset, eval_dataset, batch, loss_fn, train
     selected_points = torch.zeros(1, H, W, topk, 3)
 
     bkg_seq_len_attn = 0
-    tx_opt = args.models.transformer
-    feat_dim = tx_opt.embed.d_ff_out if tx_opt.embed.share_embed else tx_opt.embed.value.d_ff_out
+    feat_dim = args.models.attn.embed.value.d_ff_out
     if model.bkg_feats is not None:
         bkg_seq_len_attn = model.bkg_feats.shape[0]
     feature_map = torch.zeros(N, H, W, 1, feat_dim).to(device)
@@ -149,7 +148,7 @@ def eval_step(steps, model, device, dataset, eval_dataset, batch, loss_fn, train
 
         # main plot
         main_plot = get_training_main_plot(args.index, steps, train_tgt_rgb, train_tgt_patch, train_pred_patch, test_tgt_rgb, test_pred_rgb, train_losses, 
-                                           eval_losses, points_np, pt_plot_scale, depth, pt_lrs, tx_lrs, eval_psnrs, points_influ_scores_np)
+                                           eval_losses, points_np, pt_plot_scale, depth, pt_lrs, attn_lrs, eval_psnrs, points_influ_scores_np)
         save_name = os.path.join(log_dir, "train_main_plots", "%s_iter_%d.png" % (args.index, step))
         main_plot.save(save_name)
 
@@ -170,96 +169,6 @@ def eval_step(steps, model, device, dataset, eval_dataset, batch, loss_fn, train
     torch.save(torch.tensor(eval_psnrs), os.path.join(log_dir, "eval_psnrs.pth"))
 
     return 0
-
-
-def resample_shading_codes(shading_codes, args, model, dataset, img_id, loss_fn, step, full_img=False):
-    if full_img == True:
-        img, rayd, rayo = dataset.get_full_img(img_id)
-        c2w = dataset.get_c2w(img_id)
-    else:
-        _, _, img, rayd, rayo = dataset[img_id]
-        c2w = dataset.get_c2w(img_id)
-        img = torch.from_numpy(img).unsqueeze(0)
-        rayd = torch.from_numpy(rayd).unsqueeze(0)
-        rayo = torch.from_numpy(rayo).unsqueeze(0)
-
-    sampled_shading_codes = torch.randn(args.models.shading_code_num_samples, args.models.shading_code_dim, device=model.device) * args.models.shading_code_scale
-    
-    N, H, W, _ = rayd.shape
-    num_pts, _ = model.points.shape
-
-    rayo = rayo.to(model.device)
-    rayd = rayd.to(model.device)
-    img = img.to(model.device)
-    c2w = c2w.to(model.device)
-    
-    topk = min([num_pts, model.select_k])
-
-    bkg_seq_len_attn = 0
-    tx_opt = args.models.transformer
-    feat_dim = tx_opt.embed.d_ff_out if tx_opt.embed.share_embed else tx_opt.embed.value.d_ff_out
-    if model.bkg_feats is not None:
-        bkg_seq_len_attn = model.bkg_feats.shape[0]
-    feature_map = torch.zeros(N, H, W, 1, feat_dim).to(model.device)
-    attn = torch.zeros(N, H, W, topk + bkg_seq_len_attn, 1).to(model.device)
-    
-    best_idx = 0
-    best_loss = 1e10
-    best_loss_idx = 0
-    best_psnr = 0
-    best_psnr_idx = 0
-
-    with torch.no_grad():
-        for height_start in range(0, H, args.eval.max_height):
-            for width_start in range(0, W, args.eval.max_width):
-                height_end = min(height_start + args.eval.max_height, H)
-                width_end = min(width_start + args.eval.max_width, W)
-
-                feature_map[:, height_start:height_end, width_start:width_end, :, :], \
-                attn[:, height_start:height_end, width_start:width_end, :, :] = model.evaluate(rayo, rayd[:, height_start:height_end, width_start:width_end], c2w, step=step)
-        
-        for i in range(args.models.shading_code_num_samples):
-            torch.cuda.empty_cache()
-            cur_shading_code = sampled_shading_codes[i]
-            cur_affine = model.mapping_mlp(cur_shading_code)
-            cur_affine_dim = cur_affine.shape[-1]
-            cur_gamma, cur_beta = cur_affine[:cur_affine_dim // 2], cur_affine[cur_affine_dim // 2:]
-            # print(cur_shading_code.min().item(), cur_shading_code.max().item(), cur_gamma.min().item(), cur_gamma.max().item(), cur_beta.min().item(), cur_beta.max().item())
-            
-            foreground_rgb = model.renderer(feature_map.squeeze(-2).permute(0, 3, 1, 2), gamma=cur_gamma, beta=cur_beta).permute(0, 2, 3, 1).unsqueeze(-2)   # (N, H, W, 1, 3)
-
-            if model.bkg_feats is not None:
-                bkg_attn = attn[..., topk:, :]
-                if args.models.normalize_topk_attn:
-                    rgb = foreground_rgb * (1 - bkg_attn) + model.bkg_feats.expand(N, H, W, -1, -1) * bkg_attn
-                else:
-                    rgb = foreground_rgb + model.bkg_feats.expand(N, H, W, -1, -1) * bkg_attn
-                rgb = rgb.squeeze(-2)
-            else:
-                rgb = foreground_rgb.squeeze(-2)
-
-            rgb = model.last_act(rgb)
-            # rgb = torch.clamp(rgb, 0, 1)
-
-            eval_loss = loss_fn(rgb, img)
-            eval_psnr = -10. * np.log(((rgb - img)**2).mean().item()) / np.log(10.)
-            
-            if eval_loss < best_loss:
-                best_loss = eval_loss
-                best_loss_idx = i
-
-            if eval_psnr > best_psnr:
-                best_psnr = eval_psnr
-                best_psnr_idx = i
-
-            model.clear_grad()
-
-    # print("Best loss:", best_loss, "Best loss idx:", best_loss_idx, "Best psnr:", best_psnr, "Best psnr idx:", best_psnr_idx)
-    best_idx = best_loss_idx if args.models.shading_code_resample_select_by == "loss" else best_psnr_idx
-    shading_codes[img_id] = sampled_shading_codes[best_idx]
-
-    del rayo, rayd, img, c2w, attn
-    del eval_loss
 
 
 def train_step(step, model, device, dataset, batch, loss_fn, args):
@@ -300,20 +209,15 @@ def train_and_eval(start_step, model, device, dataset, eval_dataset, sample_data
     steps = []
     train_losses, eval_losses, eval_psnrs = losses
     pt_lrs = []
-    tx_lrs = []
+    attn_lrs = []
 
     avg_train_loss = 0.
     step = start_step
     eval_step_cnt = start_step
-    pruned = False
     pc_frames = []
 
-    # train_shading_codes = torch.randn(len(dataset), args.models.shading_code_dim, device=device) * args.models.shading_code_scale
-    # eval_shading_codes = torch.randn(len(eval_dataset), args.models.shading_code_dim, device=device) * args.models.shading_code_scale
-    # model.register_buffer("train_shading_codes", train_shading_codes)
-    # model.register_buffer("eval_shading_codes", eval_shading_codes)
-    model.train_shading_codes = nn.Parameter(torch.randn(len(dataset), args.models.shading_code_dim, device=device) * args.models.shading_code_scale, requires_grad=False)
-    model.eval_shading_codes = nn.Parameter(torch.randn(len(eval_dataset), args.models.shading_code_dim, device=device) * args.models.shading_code_scale, requires_grad=False)
+    model.train_shading_codes = nn.Parameter(torch.randn(len(dataset), args.exposure_control.shading_code_dim, device=device) * args.exposure_control.shading_code_scale, requires_grad=False)
+    model.eval_shading_codes = nn.Parameter(torch.randn(len(eval_dataset), args.exposure_control.shading_code_dim, device=device) * args.exposure_control.shading_code_scale, requires_grad=False)
     print("!!!!! train_shading_codes:", model.train_shading_codes.shape, model.train_shading_codes.min(), model.train_shading_codes.max())
     print("!!!!! eval_shading_codes:", model.eval_shading_codes.shape, model.eval_shading_codes.min(), model.eval_shading_codes.max())
 
@@ -321,57 +225,12 @@ def train_and_eval(start_step, model, device, dataset, eval_dataset, sample_data
     start_time = time.time()
     while step < args.training.steps:
         for _, batch in enumerate(trainloader):
-            if step % args.models.shading_code_resample_iter == 0:  # Resample shading codes
+            if step % args.exposure_control.shading_code_resample_iter == 0:  # Resample shading codes
                 print("Resampling shading codes")
                 print("Before resampling:", model.train_shading_codes.shape, model.train_shading_codes.min(), model.train_shading_codes.max())
                 for img_idx in tqdm(range(len(sample_dataset))):
                     resample_shading_codes(model.train_shading_codes, args, model, sample_dataset, img_idx, loss_fn, step)
                 print("After resampling:", model.train_shading_codes.shape, model.train_shading_codes.min(), model.train_shading_codes.max())
-
-            if (args.training.prune_steps > 0) and (step < args.training.prune_stop) and (step >= args.training.prune_start):
-                if len(args.training.prune_steps_list) > 0 and step % args.training.prune_steps == 0:
-                    cur_prune_thresh = args.training.prune_thresh_list[bisect.bisect_left(args.training.prune_steps_list, step)]
-                    model.clear_optimizer()
-                    model.clear_scheduler()
-                    num_pruned = model.prune_points(cur_prune_thresh)
-                    model.init_optimizers(step)
-                    pruned = True
-                    print("Step %d: Pruned %d points, prune threshold %f" % (step, num_pruned, cur_prune_thresh))
-
-                elif step % args.training.prune_steps == 0:
-                    model.clear_optimizer()
-                    model.clear_scheduler()
-                    num_pruned = model.prune_points(args.training.prune_thresh)
-                    model.init_optimizers(step)
-                    pruned = True
-                    print("Step %d: Pruned %d points" % (step, num_pruned))
-
-            if pruned and len(args.training.add_steps_list) > 0:
-                if step in args.training.add_steps_list:
-                    cur_add_num = args.training.add_num_list[args.training.add_steps_list.index(step)]
-                    if 'max_num_pts' in args and args.max_num_pts > 0:
-                        cur_add_num = min(cur_add_num, args.max_num_pts - model.points.shape[0])
-                    
-                    if cur_add_num > 0:
-                        model.clear_optimizer()
-                        model.clear_scheduler()
-                        num_added = model.add_points(cur_add_num)
-                        model.init_optimizers(step)
-                        model.added_points = True
-                        print("Step %d: Added %d points" % (step, num_added))
-
-            elif pruned and (args.training.add_steps > 0) and (step % args.training.add_steps == 0) and (step < args.training.add_stop) and (step >= args.training.add_start):
-                cur_add_num = args.training.add_num
-                if 'max_num_pts' in args and args.max_num_pts > 0:
-                    cur_add_num = min(cur_add_num, args.max_num_pts - model.points.shape[0])
-                
-                if cur_add_num > 0:
-                    model.clear_optimizer()
-                    model.clear_scheduler()
-                    num_added = model.add_points(args.training.add_num)
-                    model.init_optimizers(step)
-                    model.added_points = True
-                    print("Step %d: Added %d points" % (step, num_added))
 
             loss, out = train_step(step, model, device, dataset, batch, loss_fn, args)
             avg_train_loss += loss
@@ -380,16 +239,16 @@ def train_and_eval(start_step, model, device, dataset, eval_dataset, sample_data
             
             if step % 200 == 0:
                 time_used = time.time() - start_time
-                print("Train step:", step, "loss:", loss, "tx_lr:", model.tx_lr, "pts_lr:", model.pts_lr, "scale:", model.scaler.get_scale(), f"time: {time_used:.2f}s")
+                print("Train step:", step, "loss:", loss, "attn_lr:", model.attn_lr, "pts_lr:", model.pts_lr, "scale:", model.scaler.get_scale(), f"time: {time_used:.2f}s")
                 print(model.mapping_mlp.model.model[7].weight[0, :5])
                 start_time = time.time()
 
             if (step % args.eval.step == 0) or (step % 500 == 0 and step < 10000):
                 train_losses.append(avg_train_loss / eval_step_cnt)
                 pt_lrs.append(model.pts_lr)
-                tx_lrs.append(model.tx_lr)
+                attn_lrs.append(model.attn_lr)
                 steps.append(step)
-                eval_step(steps, model, device, dataset, eval_dataset, batch, loss_fn, out, args, train_losses, eval_losses, eval_psnrs, pt_lrs, tx_lrs)
+                eval_step(steps, model, device, dataset, eval_dataset, batch, loss_fn, out, args, train_losses, eval_losses, eval_psnrs, pt_lrs, attn_lrs)
                 avg_train_loss = 0.
                 eval_step_cnt = 0
 
@@ -467,23 +326,29 @@ def main(args, eval_args, sample_args, resume):
 
 if __name__ == '__main__':
 
+    with open("configs/default.yml", 'r') as f:
+        default_config = yaml.safe_load(f)
+
     args = parse_args()
     with open(args.opt, 'r') as f:
         config = yaml.safe_load(f)
-    sample_config = copy.deepcopy(config)
-    sample_config['dataset']['patches']['height'] = config['models']['shading_code_resample_size']
-    sample_config['dataset']['patches']['width'] = config['models']['shading_code_resample_size']
+    
+    train_config = copy.deepcopy(default_config)
+    update_dict(train_config, config)
+
+    sample_config = copy.deepcopy(train_config)
+    sample_config['dataset']['patches']['height'] = train_config['exposure_control']['shading_code_resample_size']
+    sample_config['dataset']['patches']['width'] = train_config['exposure_control']['shading_code_resample_size']
     sample_config = DictAsMember(sample_config)
 
-    eval_config = copy.deepcopy(config)
+    eval_config = copy.deepcopy(train_config)
     eval_config['dataset'].update(eval_config['eval']['dataset'])
     eval_config = DictAsMember(eval_config)
-    config = DictAsMember(config)
+    train_config = DictAsMember(train_config)
 
-    assert config.models.use_renderer, "Currently only support using renderer for exposure control"
-    assert config.models.mapping_mlp.use, "Mapping MLP must be used for exposure control"
+    assert train_config.models.use_renderer, "Currently only support using renderer for exposure control"
 
-    log_dir = os.path.join(config.save_dir, config.index)
+    log_dir = os.path.join(train_config.save_dir, train_config.index)
     os.makedirs(log_dir, exist_ok=True)
 
     sys.stdout = Logger(os.path.join(log_dir, 'train.log'), sys.stdout)
@@ -494,6 +359,6 @@ if __name__ == '__main__':
 
     find_all_python_files_and_zip(".", os.path.join(log_dir, "code.zip"))
 
-    setup_seed(config.seed)
+    setup_seed(train_config.seed)
 
-    main(config, eval_config, sample_config, args.resume)
+    main(train_config, eval_config, sample_config, args.resume)

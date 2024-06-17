@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import random
 import sys
-from logger import *
+from utils import *
 from dataset import get_dataset, get_loader
 from models import get_model, get_loss
 import lpips
@@ -43,17 +43,23 @@ def parse_args():
     parser = argparse.ArgumentParser(description="PAPR")
     parser.add_argument('--opt', type=str, default="", help='Option file path')
     parser.add_argument('--resume', type=int, default=250000, help='Resume step')
-    parser.add_argument('--resample', action='store_true', help='Resample shading codes')
+    parser.add_argument('--intrp', action='store_true', help='[Exposure control] Interpolation')
+    parser.add_argument('--random', action='store_true', help='[Exposure control] Random exposure control')
+    parser.add_argument('--resample', action='store_true', help='[Exposure control] Resample shading codes')
+    parser.add_argument('--seed', type=int, default=1, help='[Exposure control] Random seed')
+    parser.add_argument('--frame', type=int, default=0, help='[Exposure control] Test frame index')
+    parser.add_argument('--scale', type=float, default=1.0, help='[Exposure control] Shading code scale')
+    parser.add_argument('--num_samples', type=int, default=20, help='[Exposure control] Number of samples for random exposure control')
+    parser.add_argument('--start_index', type=int, default=0, help='[Exposure control] Interpolation start index')
+    parser.add_argument('--end_index', type=int, default=1, help='[Exposure control] Interpolation end index')
+    parser.add_argument('--num_intrp', type=int, default=10, help='[Exposure control] Number of interpolations')
     return parser.parse_args()
 
 
-def test_step(frame, num_frames, model, device, dataset, batch, loss_fn, lpips_loss_fn_alex, lpips_loss_fn_vgg, args, test_losses, test_psnrs, test_ssims, test_lpips_alexs, test_lpips_vggs, resume_step, resample, cur_shading_code):
+def test_step(frame, i, num_frames, model, device, dataset, batch, loss_fn, lpips_loss_fn_alex, lpips_loss_fn_vgg, args, 
+              config, test_losses, test_psnrs, test_ssims, test_lpips_alexs, test_lpips_vggs, resume_step, cur_shading_code, suffix):
     idx, _, img, rayd, rayo = batch
     c2w = dataset.get_c2w(idx.squeeze())
-
-    if resample:
-        print("Resampling shading codes")
-        cur_shading_code = resample_shading_codes(cur_shading_code[None, ...], args, model, dataset, 0, loss_fn, resume_step, full_img=True).squeeze(0)
 
     N, H, W, _ = rayd.shape
     num_pts, _ = model.points.shape
@@ -67,8 +73,7 @@ def test_step(frame, num_frames, model, device, dataset, batch, loss_fn, lpips_l
     selected_points = torch.zeros(1, H, W, topk, 3)
 
     bkg_seq_len_attn = 0
-    tx_opt = args.models.transformer
-    feat_dim = tx_opt.embed.d_ff_out if tx_opt.embed.share_embed else tx_opt.embed.value.d_ff_out
+    feat_dim = args.models.attn.embed.value.d_ff_out
     if model.bkg_feats is not None:
         bkg_seq_len_attn = model.bkg_feats.shape[0]
     feature_map = torch.zeros(N, H, W, 1, feat_dim).to(device)
@@ -131,7 +136,8 @@ def test_step(frame, num_frames, model, device, dataset, batch, loss_fn, lpips_l
 
     if args.test.save_fig:
         # To save the rendered images, depth maps, foreground rgb, and background mask
-        log_dir = os.path.join(args.save_dir, args.index, 'test', f'exposure_control_test_resample{resample}')
+        dir_name = f'exposure_control_{suffix}_scale{config.scale}' if suffix in ['intrp', 'random'] else f'exposure_control_{suffix}'
+        log_dir = os.path.join(args.save_dir, args.index, 'test', dir_name)
         os.makedirs(log_dir, exist_ok=True)
         cur_depth /= args.dataset.coord_scale
         cur_depth *= (65536 / 10)
@@ -179,98 +185,7 @@ def test_step(frame, num_frames, model, device, dataset, batch, loss_fn, lpips_l
     return plots
 
 
-def resample_shading_codes(shading_codes, args, model, dataset, img_id, loss_fn, step, full_img=False):
-    if full_img == True:
-        img, rayd, rayo = dataset.get_full_img(img_id)
-        c2w = dataset.get_c2w(img_id)
-    else:
-        _, _, img, rayd, rayo = dataset[img_id]
-        c2w = dataset.get_c2w(img_id)
-        img = torch.from_numpy(img).unsqueeze(0)
-        rayd = torch.from_numpy(rayd).unsqueeze(0)
-        rayo = torch.from_numpy(rayo).unsqueeze(0)
-
-    sampled_shading_codes = torch.randn(args.models.shading_code_num_samples, args.models.shading_code_dim, device=model.device) * args.models.shading_code_scale
-    
-    N, H, W, _ = rayd.shape
-    num_pts, _ = model.points.shape
-
-    rayo = rayo.to(model.device)
-    rayd = rayd.to(model.device)
-    img = img.to(model.device)
-    c2w = c2w.to(model.device)
-    
-    topk = min([num_pts, model.select_k])
-
-    bkg_seq_len_attn = 0
-    tx_opt = args.models.transformer
-    feat_dim = tx_opt.embed.d_ff_out if tx_opt.embed.share_embed else tx_opt.embed.value.d_ff_out
-    if model.bkg_feats is not None:
-        bkg_seq_len_attn = model.bkg_feats.shape[0]
-    feature_map = torch.zeros(N, H, W, 1, feat_dim).to(model.device)
-    attn = torch.zeros(N, H, W, topk + bkg_seq_len_attn, 1).to(model.device)
-    
-    best_idx = 0
-    best_loss = 1e10
-    best_loss_idx = 0
-    best_psnr = 0
-    best_psnr_idx = 0
-
-    with torch.no_grad():
-        for height_start in range(0, H, args.eval.max_height):
-            for width_start in range(0, W, args.eval.max_width):
-                height_end = min(height_start + args.eval.max_height, H)
-                width_end = min(width_start + args.eval.max_width, W)
-
-                feature_map[:, height_start:height_end, width_start:width_end, :, :], \
-                attn[:, height_start:height_end, width_start:width_end, :, :] = model.evaluate(rayo, rayd[:, height_start:height_end, width_start:width_end], c2w, step=step)
-        
-        for i in range(args.models.shading_code_num_samples):
-            torch.cuda.empty_cache()
-            cur_shading_code = sampled_shading_codes[i]
-            cur_affine = model.mapping_mlp(cur_shading_code)
-            cur_affine_dim = cur_affine.shape[-1]
-            cur_gamma, cur_beta = cur_affine[:cur_affine_dim // 2], cur_affine[cur_affine_dim // 2:]
-            
-            foreground_rgb = model.renderer(feature_map.squeeze(-2).permute(0, 3, 1, 2), gamma=cur_gamma, beta=cur_beta).permute(0, 2, 3, 1).unsqueeze(-2)   # (N, H, W, 1, 3)
-
-            if model.bkg_feats is not None:
-                bkg_attn = attn[..., topk:, :]
-                if args.models.normalize_topk_attn:
-                    rgb = foreground_rgb * (1 - bkg_attn) + model.bkg_feats.expand(N, H, W, -1, -1) * bkg_attn
-                else:
-                    rgb = foreground_rgb + model.bkg_feats.expand(N, H, W, -1, -1) * bkg_attn
-                rgb = rgb.squeeze(-2)
-            else:
-                rgb = foreground_rgb.squeeze(-2)
-
-            rgb = model.last_act(rgb)
-            # rgb = torch.clamp(rgb, 0, 1)
-
-            eval_loss = loss_fn(rgb, img)
-            eval_psnr = -10. * np.log(((rgb - img)**2).mean().item()) / np.log(10.)
-            
-            if eval_loss < best_loss:
-                best_loss = eval_loss
-                best_loss_idx = i
-
-            if eval_psnr > best_psnr:
-                best_psnr = eval_psnr
-                best_psnr_idx = i
-
-            model.clear_grad()
-
-    # print("Best loss:", best_loss, "Best loss idx:", best_loss_idx, "Best psnr:", best_psnr, "Best psnr idx:", best_psnr_idx)
-    best_idx = best_loss_idx if args.models.shading_code_resample_select_by == "loss" else best_psnr_idx
-    shading_codes[img_id] = sampled_shading_codes[best_idx]
-
-    del rayo, rayd, img, c2w, attn
-    del eval_loss
-
-    return shading_codes
-
-
-def test(model, device, dataset, save_name, args, resume_step, resample, shading_codes):
+def test(model, device, dataset, save_name, args, config, resume_step, shading_codes):
     testloader = get_loader(dataset, args.dataset, mode="test")
     print("testloader:", testloader)
 
@@ -287,19 +202,60 @@ def test(model, device, dataset, save_name, args, resume_step, resample, shading
     test_ssims = []
     test_lpips_alexs = []
     test_lpips_vggs = []
-
     frames = {}
-    for frame, batch in enumerate(testloader):
-        cur_shading_code = shading_codes[frame]
-        plots = test_step(frame, len(testloader), model, device, dataset, batch, loss_fn, lpips_loss_fn_alex,
-                        lpips_loss_fn_vgg, args, test_losses, test_psnrs, test_ssims, test_lpips_alexs, 
-                        test_lpips_vggs, resume_step, resample, cur_shading_code)
 
-        if plots:
-            for key, value in plots.items():
-                if key not in frames:
-                    frames[key] = []
-                frames[key].append(value)
+    if config.random:
+        suffix = "random"
+        for frame, batch in enumerate(testloader):
+            if frame != config.frame:
+                continue
+
+            for i in range(config.num_samples):
+                print("test seed:", config.seed, "i:", i)
+                shading_codes = torch.randn(1, args.exposure_control.shading_code_dim, device=device) * config.scale
+                plots = test_step(frame, i, len(testloader), model, device, dataset, batch, loss_fn, lpips_loss_fn_alex,
+                                lpips_loss_fn_vgg, args, config, test_losses, test_psnrs, test_ssims, test_lpips_alexs, 
+                                test_lpips_vggs, resume_step, shading_codes, suffix)
+
+    elif config.intrp:
+        suffix = "intrp"
+        latent_codes = []
+        ids = [config.start_index, config.end_index]
+        for i in range(config.num_samples):
+            print("test seed:", config.seed, "i:", i)
+            shading_codes = torch.randn(1, args.exposure_control.shading_code_dim, device=device) * config.scale
+
+            if i in ids:
+                latent_codes.append(shading_codes)
+
+        interpolated_codes = []
+        for j in range(config.num_intrp):
+            interpolated_codes.append(latent_codes[0] + (latent_codes[1] - latent_codes[0]) * (j + 1) / config.num_intrp)
+
+        frames = {}
+        for frame, batch in enumerate(testloader):
+            if frame != config.frame:
+                continue
+
+            for i in range(config.num_intrp):
+                shading_codes = interpolated_codes[i]
+                plots = test_step(frame, i, len(testloader), model, device, dataset, batch, loss_fn, lpips_loss_fn_alex,
+                                lpips_loss_fn_vgg, args, config, test_losses, test_psnrs, test_ssims, test_lpips_alexs, 
+                                test_lpips_vggs, resume_step, shading_codes, suffix)
+
+    else:
+        suffix = "test"
+        for frame, batch in enumerate(testloader):
+            cur_shading_code = shading_codes[frame]
+            plots = test_step(frame, 0, len(testloader), model, device, dataset, batch, loss_fn, lpips_loss_fn_alex,
+                            lpips_loss_fn_vgg, args, config, test_losses, test_psnrs, test_ssims, test_lpips_alexs, 
+                            test_lpips_vggs, resume_step, cur_shading_code, suffix)
+
+            if plots:
+                for key, value in plots.items():
+                    if key not in frames:
+                        frames[key] = []
+                    frames[key].append(value)
 
     test_loss = np.mean(test_losses)
     test_psnr = np.mean(test_psnrs)
@@ -320,7 +276,7 @@ def test(model, device, dataset, save_name, args, resume_step, resample, shading
     print(f"Avg test loss: {test_loss:.4f}, test PSNR: {test_psnr:.4f}, test SSIM: {test_ssim:.4f}, test LPIPS Alex: {test_lpips_alex:.4f}, test LPIPS VGG: {test_lpips_vgg:.4f}")
 
 
-def main(args, save_name, mode, resume_step=0, resample=False):
+def main(config, args, save_name, mode, resume_step=0):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = get_model(args, device)
     dataset = get_dataset(args.dataset, mode=mode)
@@ -368,19 +324,25 @@ def main(args, save_name, mode, resume_step=0, resample=False):
     else:
         raise NotImplementedError
 
-    test(model, device, dataset, save_name, args, resume_step, resample, shading_codes)
+    test(model, device, dataset, save_name, args, config, resume_step, shading_codes)
 
 
 if __name__ == '__main__':
 
+    with open("configs/default.yml", 'r') as f:
+        default_config = yaml.safe_load(f)
+
     args = parse_args()
-    resample = args.resample
+    assert not args.intrp or not args.random, "Cannot use both interpolation and random exposure control"
     with open(args.opt, 'r') as f:
         config = yaml.safe_load(f)
 
+    test_config = copy.deepcopy(default_config)
+    update_dict(test_config, config)
+
     resume_step = args.resume
 
-    log_dir = os.path.join(config["save_dir"], config['index'])
+    log_dir = os.path.join(test_config["save_dir"], test_config['index'])
     os.makedirs(log_dir, exist_ok=True)
 
     sys.stdout = Logger(os.path.join(log_dir, 'test.log'), sys.stdout)
@@ -389,16 +351,15 @@ if __name__ == '__main__':
     shutil.copyfile(__file__, os.path.join(log_dir, os.path.basename(__file__)))
     shutil.copyfile(args.opt, os.path.join(log_dir, os.path.basename(args.opt)))
 
-    setup_seed(config['seed'])
+    setup_seed(test_config['seed'])
 
-    for i, dataset in enumerate(config['test']['datasets']):
+    for i, dataset in enumerate(test_config['test']['datasets']):
         name = dataset['name']
         mode = dataset['mode']
         print(name, dataset)
-        config['dataset'].update(dataset)
-        args = DictAsMember(config)
+        test_config['dataset'].update(dataset)
+        test_config = DictAsMember(test_config)
 
-        assert args.models.use_renderer, "Currently only support using renderer for exposure control"
-        assert args.models.mapping_mlp.use, "Mapping MLP must be used for exposure control"
+        assert test_config.models.use_renderer, "Currently only support using renderer for exposure control"
 
-        main(args, name, mode, resume_step, resample)
+        main(args, test_config, name, mode, resume_step)

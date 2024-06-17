@@ -6,12 +6,13 @@ import os
 import numpy as np
 from .utils import normalize_vector, create_learning_rate_fn, add_points_knn, activation_func
 from .mlp import get_mapping_mlp
-from .tx import get_transformer
+from .attn import get_proximity_attention_layer
 from .renderer import get_generator
 
 
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
 
 class PAPR(nn.Module):
     def __init__(self, args, device='cuda'):
@@ -27,6 +28,8 @@ class PAPR(nn.Module):
         point_opt = args.geoms.points
         pc_feat_opt = args.geoms.point_feats
         bkg_feat_opt = args.geoms.background
+        exposure_opt = args.exposure_control
+        self.exposure_opt = exposure_opt
 
         self.register_buffer('select_k', torch.tensor(
             point_opt.select_k, device=device, dtype=torch.int32))
@@ -47,9 +50,9 @@ class PAPR(nn.Module):
             pt_init_center = [i * self.coord_scale for i in point_opt.init_center]
             pt_init_scale = [i * self.coord_scale for i in point_opt.init_scale]
             if point_opt.init_type == 'sphere': # initial points on a sphere
-                points = self._sphere_pc(pt_init_center, point_opt.num, pt_init_scale)
+                points = self._sphere_pc(pt_init_center, point_opt.init_num, pt_init_scale)
             elif point_opt.init_type == 'cube': # initial points in a cube
-                points = self._cube_normal_pc(pt_init_center, point_opt.num, pt_init_scale)
+                points = self._cube_normal_pc(pt_init_center, point_opt.init_num, pt_init_scale)
             else:
                 raise NotImplementedError("Point init type [{:s}] is not found".format(point_opt.init_type))
             print("Initialized points scale: ", points[:, 0].min(), points[:, 0].max(), points[:, 1].min(), points[:, 1].max(), points[:, 2].min(), points[:, 2].max())
@@ -61,34 +64,22 @@ class PAPR(nn.Module):
 
         # Initialize mapping MLP, only if fine-tuning with IMLE for the exposure control
         self.mapping_mlp = None
-        if args.models.mapping_mlp.use:
-            self.mapping_mlp = get_mapping_mlp(
-                args.models, use_amp=self.use_amp, amp_dtype=self.amp_dtype)
+        if exposure_opt.use:
+            self.mapping_mlp = get_mapping_mlp(exposure_opt, use_amp=self.use_amp, amp_dtype=self.amp_dtype)
 
         # Initialize UNet
         if args.models.use_renderer:
-            tx_opt = args.models.transformer
-            feat_dim = tx_opt.embed.d_ff_out if tx_opt.embed.share_embed else tx_opt.embed.value.d_ff_out
+            attn_opt = args.models.attn
+            feat_dim = attn_opt.embed.value.d_ff_out
             self.renderer = get_generator(args.models.renderer.generator, in_c=feat_dim,
                                           out_c=3, use_amp=self.use_amp, amp_dtype=self.amp_dtype)
             print("Number of parameters of renderer: ", count_parameters(self.renderer))
         else:
-            assert (args.models.transformer.embed.share_embed and args.models.transformer.embed.d_ff_out == 3) or \
-                (not args.models.transformer.embed.share_embed and args.models.transformer.embed.value.d_ff_out == 3), \
+            assert args.models.attn.embed.value.d_ff_out == 3, \
                 "Value embedding MLP should have output dim 3 if not using renderer"
 
         # Initialize background score and features
-        if bkg_feat_opt.init_type == 'random':
-            bkg_feat_init_func = torch.rand
-        elif bkg_feat_opt.init_type == 'zeros':
-            bkg_feat_init_func = torch.zeros
-        elif bkg_feat_opt.init_type == 'ones':
-            bkg_feat_init_func = torch.ones
-        else:
-            raise NotImplementedError(
-                "Background init type [{:s}] is not found".format(bkg_feat_opt.init_type))
-        feat_dim = 3
-        self.bkg_feats = nn.Parameter(bkg_feat_init_func(bkg_feat_opt.seq_len, feat_dim, device=device) * bkg_feat_opt.init_scale, requires_grad=bkg_feat_opt.learnable)
+        self.bkg_feats = nn.Parameter(torch.FloatTensor(bkg_feat_opt.init_color)[None, :], requires_grad=bkg_feat_opt.learnable)
         self.bkg_score = torch.tensor(bkg_feat_opt.constant, device=device, dtype=torch.float32).reshape(1)
 
         # Initialize point features
@@ -112,16 +103,14 @@ class PAPR(nn.Module):
 
         self.last_act = activation_func(args.models.last_act)
 
-        # Initialize proximity attention layer(s)
-        transformer = get_transformer(args.models.transformer,
-                                      seq_len=point_opt.num,
+        # Initialize proximity attention layer
+        self.proximity_attn = get_proximity_attention_layer(args.models.attn,
                                       v_extra_dim=v_extra_dim,
                                       k_extra_dim=k_extra_dim,
                                       q_extra_dim=q_extra_dim,
                                       eps=self.eps,
                                       use_amp=self.use_amp,
                                       amp_dtype=self.amp_dtype)
-        self.transformer = transformer
 
         self.init_optimizers(total_steps=0)
 
@@ -129,23 +118,23 @@ class PAPR(nn.Module):
         lr_opt = self.args.training.lr
         print("LR factor: ", lr_opt.lr_factor)
         optimizer_points = torch.optim.Adam([self.points], lr=lr_opt.points.base_lr * lr_opt.lr_factor)
-        optimizer_tx = torch.optim.Adam(self.transformer.parameters(), lr=lr_opt.transformer.base_lr * lr_opt.lr_factor, weight_decay=lr_opt.transformer.weight_decay)
+        optimizer_attn = torch.optim.Adam(self.proximity_attn.parameters(), lr=lr_opt.attn.base_lr * lr_opt.lr_factor, weight_decay=lr_opt.attn.weight_decay)
         optimizer_points_influ_scores = torch.optim.Adam([self.points_influ_scores], lr=lr_opt.points_influ_scores.base_lr * lr_opt.lr_factor, weight_decay=lr_opt.points_influ_scores.weight_decay)
 
         debug = False
         lr_scheduler_points = create_learning_rate_fn(optimizer_points, self.args.training.steps, lr_opt.points, debug=debug)
-        lr_scheduler_tx = create_learning_rate_fn(optimizer_tx, self.args.training.steps, lr_opt.transformer, debug=debug)
+        lr_scheduler_attn = create_learning_rate_fn(optimizer_attn, self.args.training.steps, lr_opt.attn, debug=debug)
         lr_scheduler_points_influ_scores = create_learning_rate_fn(optimizer_points_influ_scores, self.args.training.steps, lr_opt.points_influ_scores, debug=debug)
 
         self.optimizers = {
             "points": optimizer_points,
-            "transformer": optimizer_tx,
+            "attn": optimizer_attn,
             "points_influ_scores": optimizer_points_influ_scores,
         }
 
         self.schedulers = {
             "points": lr_scheduler_points,
-            "transformer": lr_scheduler_tx,
+            "attn": lr_scheduler_attn,
             "points_influ_scores": lr_scheduler_points_influ_scores,
         }
 
@@ -289,7 +278,7 @@ class PAPR(nn.Module):
         D = v - proj    # (N, H, W, num_pts, 3)
         feature = torch.norm(D, dim=-1)
 
-        _, select_k_ind = feature.topk(self.select_k, dim=-1, largest=False, sorted=self.args.geoms.points.select_k_sorted)  # (N, H, W, select_k)
+        _, select_k_ind = feature.topk(self.select_k, dim=-1, largest=False, sorted=False)  # (N, H, W, select_k)
 
         return select_k_ind
 
@@ -410,24 +399,24 @@ class PAPR(nn.Module):
         """
         _, _, vec_p2o, vec_p2r = self._calculate_distances(rays_o, rays_d, points, c2w)
 
-        k_type = self.args.models.transformer.k_type
-        k_L = self.args.models.transformer.embed.k_L
+        k_type = self.args.models.attn.k_type
+        k_L = self.args.models.attn.embed.k_L
         if k_type == 1:
             key = [points.detach(), vec_p2o, vec_p2r]
         else:
             raise ValueError('Invalid key type')
         assert len(key) == (len(k_L))
 
-        q_type = self.args.models.transformer.q_type
-        q_L = self.args.models.transformer.embed.q_L
+        q_type = self.args.models.attn.q_type
+        q_L = self.args.models.attn.embed.q_L
         if q_type == 1:
             query = [rays_d.unsqueeze(-2)]
         else:
             raise ValueError('Invalid query type')
         assert len(query) == (len(q_L))
 
-        v_type = self.args.models.transformer.v_type
-        v_L = self.args.models.transformer.embed.v_L
+        v_type = self.args.models.attn.v_type
+        v_L = self.args.models.attn.embed.v_L
         if v_type == 1:
             value = [vec_p2o, vec_p2r]
         else:
@@ -456,12 +445,12 @@ class PAPR(nn.Module):
             if scheduler is not None:
                 scheduler.step()
 
-        self.tx_lr = 0
-        if 'transformer' in self.optimizers:
-            if self.schedulers['transformer'] is not None:
-                self.tx_lr = self.schedulers['transformer'].get_last_lr()[0]
+        self.attn_lr = 0
+        if 'attn' in self.optimizers:
+            if self.schedulers['attn'] is not None:
+                self.attn_lr = self.schedulers['attn'].get_last_lr()[0]
             else:
-                self.tx_lr = self.optimizers['transformer'].param_groups[0]['lr']
+                self.attn_lr = self.optimizers['attn'].param_groups[0]['lr']
 
         self.pts_lr = 0
         if 'points' in self.optimizers:
@@ -479,7 +468,7 @@ class PAPR(nn.Module):
 
         cur_points_influ_score = self.points_influ_scores[select_k_ind] if self.points_influ_scores is not None else None
 
-        _, _, embedv, _, scores = self.transformer(key, query, value, k_extra, q_extra, v_extra, step=step)
+        _, _, embedv, scores = self.proximity_attn(key, query, value, k_extra, q_extra, v_extra, step=step)
 
         embedv = embedv.reshape(N, H, W, -1, embedv.shape[-1])
         scores = scores.reshape(N, H, W, -1, 1)
@@ -509,8 +498,8 @@ class PAPR(nn.Module):
             affine_dim = affine.shape[-1]
             gamma, beta = affine[:affine_dim//2], affine[affine_dim//2:]
         
-        if step % 200 == 0:
-            print(shading_code.min().item(), shading_code.max().item(), gamma.min().item(), gamma.max().item(), beta.min().item(), beta.max().item())
+            if step % 200 == 0:
+                print(shading_code.min().item(), shading_code.max().item(), gamma.min().item(), gamma.max().item(), beta.min().item(), beta.max().item())
 
         points, select_k_ind = self._get_points(rays_o, rays_d, c2w, step)
         key, query, value, k_extra, q_extra, v_extra = self._get_kqv(rays_o, rays_d, points, c2w, select_k_ind, step)
@@ -519,11 +508,9 @@ class PAPR(nn.Module):
 
         cur_points_influ_scores = self.points_influ_scores[select_k_ind] if self.points_influ_scores is not None else None
 
-        _, _, embedv, encode, scores = self.transformer(key, query, value, k_extra, q_extra, v_extra, step=step)
+        _, _, embedv, scores = self.proximity_attn(key, query, value, k_extra, q_extra, v_extra, step=step)
 
         if step >= 0 and step % 200 == 0:
-            print(' encode:', step, encode.shape, encode.min().item(),
-                  encode.max().item(), encode.mean().item(), encode.std().item())
             print(' embedv:', step, embedv.shape, embedv.min().item(),
                   embedv.max().item(), embedv.mean().item(), embedv.std().item())
             print(' scores:', step, scores.shape, scores.min().item(),

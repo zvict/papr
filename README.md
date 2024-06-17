@@ -60,21 +60,26 @@ papr
 │   │   │   ├── intrinsics.txt
 │   │   ├── ...
 ```
-#### NeRF Synthetic
+### NeRF Synthetic
 Download NeRF Synthetic Dataset from [here](https://drive.google.com/drive/folders/128yBriW1IG_3NJ5Rp7APSTZsJqdJdfc1) and put it under `data/nerf_synthetic/`
 
 
-#### Tanks & Temples
+### Tanks & Temples
 Download [Tanks&Temples](https://www.tanksandtemples.org/) from [here](https://dl.fbaipublicfiles.com/nsvf/dataset/TanksAndTemple.zip) and put it under:
 `data/tanks_temples/`
 
-#### Use your own data
+### Use your own data
+You can refer to this [issue](https://github.com/zvict/papr/issues/3#issuecomment-1907260683) for the instructions on how to prepare the dataset.
 
+You need to create a new configuration file for your own dataset, and put it under `configs`. The parameter `dataset.type` in the configuration file specifies the type of the dataset. If your dataset is in the same format as the NeRF Synthetic dataset, you can directly set `dataset.type` to `"synthetic"`. Otherwise, you need to implement your own python script to load the dataset under the `dataset` folder, and add it in the function `load_meta_data` in `dataset/utils.py`.
 
+Most default parameters in `configs/default.yml` are general and can be used for your own dataset. You can specify the parameters that are specific to your dataset in the configuration file you created, similar to the configuration files for the NeRF Synthetic dataset and the Tanks and Temples dataset.
 
 ## Overview
 
 The codebase has two main components: data loading part in `dataset/` and models in `models/`. Class `PAPR` in `models/model.py` defines our main model. All the configurations are in `configs/`, and `configs/demo.yml` is a demo configuration with comments of important arguments.
+
+We provide a notebook `demo.ipynb` to demonstrate how to train and test the model with the demo configuration file, as well as how to use exposure control to improve the rendering quality of real-world scenes captured with auto-exposure turned on.
 
 ## Training
 ```
@@ -88,7 +93,7 @@ python test.py --opt configs/nerfsyn/chair.yml
 
 ## Pretrained Models
 
-We provide pretrained models on NeRF Synthetic and Tanks&Temples datasets here: [Google Drive](https://drive.google.com/drive/folders/1fTWjuE-I30tBFCshbvC1W0TDdTlM-j82?usp=sharing).
+We provide pretrained models on NeRF Synthetic and Tanks&Temples datasets here: [Google Drive](https://drive.google.com/drive/folders/1HSNlMu6Uup9o5hqi7T0hgDf63yR9W90s?usp=sharing).
 To load the pretrained models, please put them under `checkpoints/`, and change the `test.load_path` in the config file.
 
 ## Exposure Control
@@ -101,13 +106,13 @@ python exposure_control_train.py --opt configs/t2/Caterpillar_exposure_control.y
 ```
 To generate images with different exposures controlled by random latent codes, run:
 ```
-python exposure_control_test.py --opt configs/t2/Caterpillar_exposure_control.yml --frame 0
+python exposure_control_test.py --opt configs/t2/Caterpillar_exposure_control.yml --random --frame 0
 ```
 Note that during testing, the `shading_code_scale` in the config file should be increased to generate images with more diverse exposures. You may also need to increase the learning rate for the `mapping_mlp` to model more diverse exposures during finetuning.
 
 To generate images by interpolating between two latent codes with different exposures, run:
 ```
-python exposure_control_intrp.py --opt configs/t2/Caterpillar_exposure_control.yml --frame 0 --start_index 0 --end_index 1
+python exposure_control_test.py --opt configs/t2/Caterpillar_exposure_control.yml --intrp --frame 0 --start_index 0 --end_index 1
 ```
 We also provide a pre-trained model with exposure control on the Caterpillar scene in the Google Drive link above.
 

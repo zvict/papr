@@ -100,52 +100,20 @@ def extract_patches(imgs, rays_o, rays_d, args):
     patch_opt = args.patches
     N, H, W, C = imgs.shape
 
-    if patch_opt.type == "continuous":
-        num_patches_H = math.ceil(
-            (H - patch_opt.overlap) / (patch_opt.height - patch_opt.overlap))
-        num_patches_W = math.ceil(
-            (W - patch_opt.overlap) / (patch_opt.width - patch_opt.overlap))
-        num_patches = num_patches_H * num_patches_W
-        rayd_patches = np.zeros(
-            (N, num_patches, patch_opt.height, patch_opt.width, 3), dtype=np.float32)
-        rayo_patches = np.zeros((N, num_patches, 3), dtype=np.float32)
-        img_patches = np.zeros(
-            (N, num_patches, patch_opt.height, patch_opt.width, C), dtype=np.float32)
+    num_patches = patch_opt.max_patches
+    rayd_patches = np.zeros((N, num_patches, patch_opt.height, patch_opt.width, 3), dtype=np.float32)
+    rayo_patches = np.zeros((N, num_patches, 3), dtype=np.float32)
+    img_patches = np.zeros((N, num_patches, patch_opt.height, patch_opt.width, C), dtype=np.float32)
 
-        for i in range(N):
-            n_patch = 0
-            for start_height in range(0, H - patch_opt.overlap, patch_opt.height - patch_opt.overlap):
-                for start_width in range(0, W - patch_opt.overlap, patch_opt.width - patch_opt.overlap):
-                    end_height = min(start_height + patch_opt.height, H)
-                    end_width = min(start_width + patch_opt.width, W)
-                    start_height = end_height - patch_opt.height
-                    start_width = end_width - patch_opt.width
-                    rayd_patches[i, n_patch, :, :] = rays_d[i,
-                                                            start_height:end_height, start_width:end_width]
-                    rayo_patches[i, n_patch, :] = rays_o[i, :]
-                    img_patches[i, n_patch, :, :] = imgs[i,
-                                                         start_height:end_height, start_width:end_width]
-                    n_patch += 1
-
-    elif patch_opt.type == "random":
-        num_patches = patch_opt.max_patches
-        rayd_patches = np.zeros(
-            (N, num_patches, patch_opt.height, patch_opt.width, 3), dtype=np.float32)
-        rayo_patches = np.zeros((N, num_patches, 3), dtype=np.float32)
-        img_patches = np.zeros(
-            (N, num_patches, patch_opt.height, patch_opt.width, C), dtype=np.float32)
-
-        for i in range(N):
-            for n_patch in range(num_patches):
-                start_height = np.random.randint(0, H - patch_opt.height)
-                start_width = np.random.randint(0, W - patch_opt.width)
-                end_height = start_height + patch_opt.height
-                end_width = start_width + patch_opt.width
-                rayd_patches[i, n_patch, :, :] = rays_d[i,
-                                                        start_height:end_height, start_width:end_width]
-                rayo_patches[i, n_patch, :] = rays_o[i, :]
-                img_patches[i, n_patch, :, :] = imgs[i,
-                                                     start_height:end_height, start_width:end_width]
+    for i in range(N):
+        for n_patch in range(num_patches):
+            start_height = np.random.randint(0, H - patch_opt.height)
+            start_width = np.random.randint(0, W - patch_opt.width)
+            end_height = start_height + patch_opt.height
+            end_width = start_width + patch_opt.width
+            rayd_patches[i, n_patch, :, :] = rays_d[i, start_height:end_height, start_width:end_width]
+            rayo_patches[i, n_patch, :] = rays_o[i, :]
+            img_patches[i, n_patch, :, :] = imgs[i, start_height:end_height, start_width:end_width]
 
     return img_patches, rayd_patches, rayo_patches, num_patches
 

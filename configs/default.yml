@@ -5,8 +5,6 @@ seed: 1 # random seed
 eps: 1.0e-6 # epsilon for numerical stability
 use_amp: true # use automatic mixed precision
 amp_dtype: "float16"
-scaler_init_scale: 65536.0
-scaler_growth_interval: 4000
 scaler_min_scale: -1.0  # set a lower bound for the scaler for numerical stability
 max_num_pts: 30000 # upper bound of total number of points, set to -1 to disable
 dataset:
@@ -17,16 +15,13 @@ dataset:
   path: "./data/nerf_synthetic/lego/"
   factor: 1 # downsample the target images by this factor
   batch_size: 1
-  num_workers: 0
   shuffle: true
   extract_patch: true # extract patches from the target images
   extract_online: true  # set to false if you have enough memory to load all the patches into memory before training
   read_offline: false # set to true if you have enough memory to load all the images into memory before training
   patches:
-    type: "random"  # random crop or continuous crop ("continuous"), if extract_online, then random crop is used
     height: 160 # patch height
     width: 160  # patch width
-    overlap: 10 # overlap between patches (if type is continuous)
     max_patches: 10 # maximum number of patches to extract from each image (if extract_online is false)
 geoms:
   points:
@@ -37,63 +32,58 @@ geoms:
     init_type: "cube" # initialize the point cloud in a cube or on a sphere ("sphere")
     init_scale: [1.2, 1.2, 1.2] # initial scale of the point cloud, normalized by the coord_scale
     init_center: [0.0, 0.0, 0.0]  # initial center of the point cloud, normalized by the coord_scale
-    num: 3000 # initial number of points in the point cloud
+    init_num: 3000 # initial number of points in the point cloud
     influ_init_val: 0.0 # initial influence score of each point
     add_type: "random"  # add points by interpolate add_k points randomly (or "mean", ...)
     add_k: 3  # number of points to interpolate when adding new points
     add_sample_type: "top-knn-std"  # determine where to add new points by sparsity ("top-knn-std") or ...
     add_sample_k: 10  # number of points to consider when measuring sparsity or ...
   background:
-    learnable: false  # learn the background feature or not
-    init_type: "ones" # initialize the background feature as ones or zeros, if background is white, then use ones
-    # color: [1.0, 1.0, 1.0]  # background color, normalized by 255
-    init_scale: 1.0
-    # seq_len: 1  # sequence length of the background feature
+    learnable: false  # learn the background color or not
+    init_color: [1.0, 1.0, 1.0] # initial background color, normalized by 255
     constant: 5.0 # constant background score
   point_feats:
     dim: 64 # dimension of the point features
     use_inv: true # use as a value feature in the attention layer
     use_ink: false  # use as a key feature in the attention layer
     use_inq: false  # use as a query feature in the attention layer
+exposure_control:
+  use: false
+  shading_code_dim: 128 # dimension of the shading codes
+  shading_code_scale: 1.0 # scale the shading codes by this factor, use 8.0 for random generation
+  shading_code_num_samples: 20  # number of samples to generate the shading codes
+  shading_code_resample_iter: 10000 # number of iterations to resample the shading codes
+  shading_code_resample_size: 200 # number of samples to resample the shading codes
+  shading_code_resample_select_by: "psnr" # select the best samples by "psnr" or "lpips"
+  mapping_mlp:
+    num_layers: 8
+    dim: 256
+    act: "relu"
+    last_act: "relu+1"
+    use_wn: false
+    out_dim: 64
 models:
   use_renderer: true  # use the UNet or not, if not, predicted rgb is a fused output of value embedding MLP
   last_act: "none"  # last activation function to normalize the predicted rgb
   normalize_topk_attn: true # normalize the top-k attention weights after softmax
-  shading_code_dim: 128 # for exposure control, the feature will be added soon
-  shading_code_scale: 1.0 # for exposure control, the feature will be added soon
-  shading_code_num_samples: 20  # for exposure control, the feature will be added soon
-  shading_code_resample_iter: 5000  # for exposure control, the feature will be added soon
-  mapping_mlp:  # for exposure control, the feature will be added soon
-    use: false
-    num_layers: 3
-    dim: 256
-    act: "relu"
-    last_act: "none"
-    use_wn: false
-    out_dim: 64
-  transformer:  # the proximity attention layer(s)
-    d_model: 256  # dimension of the tensor before the attention
-    d_out: 256  # dimension of the output of each attention block (if n_block > 1)
+  attn:
     k_type: 1
     q_type: 1
     v_type: 1
+    d_model: 256
+    score_act: "relu"
     embed:
       embed_type: 1 # 1: positional encoding with input itself, 2: positional encoding without input itself
-      share_embed: false  # share embedding MLPs for k, q, v
-      k_L: [6, 6, 6]  # order of the positional encoding for each feature in k
-      q_L: [6]  # order of the positional encoding for each feature in q
-      v_L: [6, 6] # order of the positional encoding for each feature in v
-      dropout: 0.0
-      temperature: 1.0
+      k_L: [6, 6, 6]   # order of the positional encoding for each feature in k
+      q_L: [6]   # order of the positional encoding for each feature in q
+      v_L: [6, 6]  # order of the positional encoding for each feature in v
       pe_factor: 2.0
       pe_mult_factor: 1.0
-      pe_type: "none"
-      pe_init_std: 0.2
       key:
         d_ff: 256 # dimension of the hidden layer in the embedding MLP
         d_ff_out: 256 # dimension of the output of the embedding MLP
         n_ff_layer: 5 # number of layers in the embedding MLP
-        ff_act: "leakyrelu"
+        ff_act: "relu"
         ff_act_a: 1.0
         ff_act_b: 1.0
         ff_act_trainable: false
@@ -110,7 +100,7 @@ models:
         d_ff: 256
         d_ff_out: 256
         n_ff_layer: 5
-        ff_act: "leakyrelu"
+        ff_act: "relu"
         ff_act_a: 1.0
         ff_act_b: 1.0
         ff_act_trainable: false
@@ -127,7 +117,7 @@ models:
         d_ff: 256
         d_ff_out: 32
         n_ff_layer: 8
-        ff_act: "leakyrelu"
+        ff_act: "relu"
         ff_act_a: 1.0
         ff_act_b: 1.0
         ff_act_trainable: false
@@ -136,43 +126,10 @@ models:
         dropout_ff: 0.0
         use_wn: false
         residual_ff: false
-        skip_layers: [5]
+        skip_layers: []
         half_layers: []
         residual_layers: []
         residual_dims: []
-      d_ff: 256
-      d_ff_out: 256
-      n_ff_layer: 5
-      ff_act: "relu"
-      ff_act_a: 1.0
-      ff_act_b: 1.0
-      ff_act_trainable: false
-      ff_last_act: "none"
-      norm: "layernorm"
-      dropout_ff: 0.0
-      use_wn: false
-      residual_ff: false
-    block:
-      n_head: 1 # number of attention heads
-      n_block: 1  # number of attention blocks
-      score_act: "relu"
-      k_act: "none"
-      q_act: "none"
-      transform_kq: true
-      temperature: 1.0
-      dropout_attn: 0.0
-      dropout_ff: 0.0
-      residual_attn: true
-      residual_ff: true
-      d_ff: 256
-      n_ff_layer: 2
-      ff_act: "relu"
-      ff_act_a: 1.0
-      ff_act_b: 1.0
-      ff_act_trainable: false
-      ff_last_act: "none"
-      norm: "layernorm"
-      use_wn: false
   renderer: # the UNet
     generator:
       type: "small-unet"
@@ -188,8 +145,8 @@ training:
   prune_start: 10000  # start pruning after this step
   prune_stop: 150000  # stop pruning after this step
   prune_thresh: 0.0  # influence score threshold to prune the point cloud
-  prune_thresh_list: [0.0, 0.2] # change the threshold at steps in prune_steps_list, if empty, then use prune_thresh
-  prune_steps_list: [40000]
+  prune_thresh_list: [] # change the threshold at steps in prune_steps_list, if empty, then use prune_thresh
+  prune_steps_list: []
   prune_type: "<" # prune points with influence scores smaller than the threshold ("<") or larger than the threshold (">")
   add_steps: 1000 # interval to add new points
   add_start: 20000  # start adding new points after this step
@@ -202,7 +159,7 @@ training:
     # "points",
     # "pc_norms",
     # # "norm_mlp",
-    # "transformer",
+    # "attn",
     # "pc_feats",
     # "attn_mlp",
     # # "renderer",
@@ -222,7 +179,7 @@ training:
       factor: 1
       warmup: 0
       weight_decay: 0
-    transformer:
+    attn:
       type: "cosine-hlfperiod"
       base_lr: 3.0e-4
       factor: 1
@@ -230,7 +187,7 @@ training:
       weight_decay: 0
     points:
       type: "cosine"
-      base_lr: 3.0e-3
+      base_lr: 2.0e-3
       factor: 1
       warmup: 0
       weight_decay: 0
@@ -273,7 +230,7 @@ eval:
   img_idx: 50 # index of the image to evaluate
   max_height: 100 # maximum size for each loop when rendering a full image, if the image is too large, it will be rendered in multiple loops due to memory constraints
   max_width: 100
-  save_fig: false # save the log images during training
+  save_fig: true # save the log images during training
 test:
   load_path: "" # path to load the model from for testing
   save_fig: true  # save the log images during testing
