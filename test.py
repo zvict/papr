@@ -1,6 +1,7 @@
 import yaml
 import argparse
 import torch
+import torch.nn as nn
 import os
 import io
 import shutil
@@ -26,12 +27,23 @@ except:
 def parse_args():
     parser = argparse.ArgumentParser(description="PAPR")
     parser.add_argument('--opt', type=str, default="", help='Option file path')
-    parser.add_argument('--resume', type=int,
-                        default=250000, help='Resume step')
+    parser.add_argument('--resume', type=int, default=250000, help='Resume step')
+    parser.add_argument('--exp', action='store_true', help='[Exposure control] To test with exposure control enabled')
+    parser.add_argument('--intrp', action='store_true', help='[Exposure control] Interpolation')
+    parser.add_argument('--random', action='store_true', help='[Exposure control] Random exposure control')
+    parser.add_argument('--resample', action='store_true', help='[Exposure control] Resample shading codes')
+    parser.add_argument('--seed', type=int, default=1, help='[Exposure control] Random seed')
+    parser.add_argument('--view', type=int, default=0, help='[Exposure control] Test frame index')
+    parser.add_argument('--scale', type=float, default=1.0, help='[Exposure control] Shading code scale')
+    parser.add_argument('--num_samples', type=int, default=20, help='[Exposure control] Number of samples for random exposure control')
+    parser.add_argument('--start_index', type=int, default=0, help='[Exposure control] Interpolation start index')
+    parser.add_argument('--end_index', type=int, default=1, help='[Exposure control] Interpolation end index')
+    parser.add_argument('--num_intrp', type=int, default=10, help='[Exposure control] Number of interpolations')
     return parser.parse_args()
 
 
-def test_step(frame, num_frames, model, device, dataset, batch, loss_fn, lpips_loss_fn_alex, lpips_loss_fn_vgg, args, test_losses, test_psnrs, test_ssims, test_lpips_alexs, test_lpips_vggs, resume_step):
+def test_step(frame, i, num_frames, model, device, dataset, batch, loss_fn, lpips_loss_fn_alex, lpips_loss_fn_vgg, args, config, 
+              test_losses, test_psnrs, test_ssims, test_lpips_alexs, test_lpips_vggs, resume_step, cur_shading_code=None, suffix=""):
     idx, _, img, rayd, rayo = batch
     c2w = dataset.get_c2w(idx.squeeze())
 
@@ -47,14 +59,20 @@ def test_step(frame, num_frames, model, device, dataset, batch, loss_fn, lpips_l
     selected_points = torch.zeros(1, H, W, topk, 3)
 
     bkg_seq_len_attn = 0
-    attn_opt = args.models.attn
-    feat_dim = attn_opt.embed.value.d_ff_out
+    feat_dim = args.models.attn.embed.value.d_ff_out
     if model.bkg_feats is not None:
         bkg_seq_len_attn = model.bkg_feats.shape[0]
     feature_map = torch.zeros(N, H, W, 1, feat_dim).to(device)
     attn = torch.zeros(N, H, W, topk + bkg_seq_len_attn, 1).to(device)
 
     with torch.no_grad():
+        cur_gamma, cur_beta, code_mean = None, None, 0
+        if cur_shading_code is not None:
+            code_mean = cur_shading_code.mean().item()
+            cur_affine = model.mapping_mlp(cur_shading_code)
+            cur_affine_dim = cur_affine.shape[-1]
+            cur_gamma, cur_beta = cur_affine[:cur_affine_dim // 2], cur_affine[cur_affine_dim // 2:]
+
         for height_start in range(0, H, args.test.max_height):
             for width_start in range(0, W, args.test.max_width):
                 height_end = min(height_start + args.test.max_height, H)
@@ -66,7 +84,7 @@ def test_step(frame, num_frames, model, device, dataset, batch, loss_fn, lpips_l
                 selected_points[:, height_start:height_end, width_start:width_end, :, :] = model.selected_points
 
         if args.models.use_renderer:
-            foreground_rgb = model.renderer(feature_map.squeeze(-2).permute(0, 3, 1, 2)).permute(0, 2, 3, 1).unsqueeze(-2)   # (N, H, W, 1, 3)
+            foreground_rgb = model.renderer(feature_map.squeeze(-2).permute(0, 3, 1, 2), gamma=cur_gamma, beta=cur_beta).permute(0, 2, 3, 1).unsqueeze(-2)   # (N, H, W, 1, 3)
         else:
             foreground_rgb = feature_map
             
@@ -97,7 +115,7 @@ def test_step(frame, num_frames, model, device, dataset, batch, loss_fn, lpips_l
     test_lpips_alexs.append(test_lpips_alex)
     test_lpips_vggs.append(test_lpips_vgg)
 
-    print(f"Test frame: {frame}, test_loss: {test_losses[-1]:.4f}, test_psnr: {test_psnrs[-1]:.4f}, test_ssim: {test_ssims[-1]:.4f}, test_lpips_alex: {test_lpips_alexs[-1]:.4f}, test_lpips_vgg: {test_lpips_vggs[-1]:.4f}")
+    print(f"Test frame: {frame}, code mean: {code_mean}, test_loss: {test_losses[-1]:.4f}, test_psnr: {test_psnrs[-1]:.4f}, test_ssim: {test_ssims[-1]:.4f}, test_lpips_alex: {test_lpips_alexs[-1]:.4f}, test_lpips_vgg: {test_lpips_vggs[-1]:.4f}")
 
     od = -rayo
     D = torch.sum(od * rayo)
@@ -109,15 +127,18 @@ def test_step(frame, num_frames, model, device, dataset, batch, loss_fn, lpips_l
 
     if args.test.save_fig:
         # To save the rendered images, depth maps, foreground rgb, and background mask
-        log_dir = os.path.join(args.save_dir, args.index, 'test', 'images')
+        dir_name = "images"
+        if cur_shading_code is not None:
+            dir_name = f'exposure_control_{suffix}_scale{config.scale}' if suffix in ['intrp', 'random'] else f'exposure_control_{suffix}'
+        log_dir = os.path.join(args.save_dir, args.index, 'test', dir_name)
         os.makedirs(log_dir, exist_ok=True)
         cur_depth /= args.dataset.coord_scale
         cur_depth *= (65536 / 10)
         cur_depth = cur_depth.astype(np.uint16)
-        imageio.imwrite(os.path.join(log_dir, "test-{:04d}-predrgb-PSNR{:.3f}-SSIM{:.4f}-LPIPSA{:.4f}-LPIPSV{:.4f}.png".format(frame, test_psnr, test_ssim, test_lpips_alex, test_lpips_vgg)), (rgb.squeeze().detach().cpu().numpy() * 255).astype(np.uint8))
-        imageio.imwrite(os.path.join(log_dir, "test-{:04d}-depth-PSNR{:.3f}-SSIM{:.4f}-LPIPSA{:.4f}-LPIPSV{:.4f}.png".format(frame, test_psnr, test_ssim, test_lpips_alex, test_lpips_vgg)), cur_depth)
-        imageio.imwrite(os.path.join(log_dir, "test-{:04d}-fgrgb-PSNR{:.3f}-SSIM{:.4f}-LPIPSA{:.4f}-LPIPSV{:.4f}.png".format(frame, test_psnr, test_ssim, test_lpips_alex, test_lpips_vgg)), (foreground_rgb.squeeze().clamp(0, 1).detach().cpu().numpy() * 255).astype(np.uint8))
-        imageio.imwrite(os.path.join(log_dir, "test-{:04d}-bkgmask-PSNR{:.3f}-SSIM{:.4f}-LPIPSA{:.4f}-LPIPSV{:.4f}.png".format(frame, test_psnr, test_ssim, test_lpips_alex, test_lpips_vgg)), (bkg_mask.detach().cpu().numpy() * 255).astype(np.uint8))
+        imageio.imwrite(os.path.join(log_dir, "test-{:04d}-{:02d}-predrgb-codeMean{:.4f}-PSNR{:.3f}-SSIM{:.4f}-LPIPSA{:.4f}-LPIPSV{:.4f}.png".format(frame, i, code_mean, test_psnr, test_ssim, test_lpips_alex, test_lpips_vgg)), (rgb.squeeze().detach().cpu().numpy() * 255).astype(np.uint8))
+        imageio.imwrite(os.path.join(log_dir, "test-{:04d}-{:02d}-depth-codeMean{:.4f}-PSNR{:.3f}-SSIM{:.4f}-LPIPSA{:.4f}-LPIPSV{:.4f}.png".format(frame, i, code_mean, test_psnr, test_ssim, test_lpips_alex, test_lpips_vgg)), cur_depth)
+        imageio.imwrite(os.path.join(log_dir, "test-{:04d}-{:02d}-fgrgb-codeMean{:.4f}-PSNR{:.3f}-SSIM{:.4f}-LPIPSA{:.4f}-LPIPSV{:.4f}.png".format(frame, i, code_mean, test_psnr, test_ssim, test_lpips_alex, test_lpips_vgg)), (foreground_rgb.squeeze().clamp(0, 1).detach().cpu().numpy() * 255).astype(np.uint8))
+        imageio.imwrite(os.path.join(log_dir, "test-{:04d}-{:02d}-bkgmask-codeMean{:.4f}-PSNR{:.3f}-SSIM{:.4f}-LPIPSA{:.4f}-LPIPSV{:.4f}.png".format(frame, i, code_mean, test_psnr, test_ssim, test_lpips_alex, test_lpips_vgg)), (bkg_mask.detach().cpu().numpy() * 255).astype(np.uint8))
 
     plots = {}
 
@@ -157,7 +178,7 @@ def test_step(frame, num_frames, model, device, dataset, batch, loss_fn, lpips_l
     return plots
 
 
-def test(model, device, dataset, save_name, args, resume_step):
+def test(model, device, dataset, save_name, args, config, resume_step, shading_codes=None):
     testloader = get_loader(dataset, args.dataset, mode="test")
     print("testloader:", testloader)
 
@@ -176,15 +197,72 @@ def test(model, device, dataset, save_name, args, resume_step):
     test_lpips_vggs = []
 
     frames = {}
-    for frame, batch in enumerate(testloader):
-        plots = test_step(frame, len(testloader), model, device, dataset, batch, loss_fn, lpips_loss_fn_alex,
-                          lpips_loss_fn_vgg, args, test_losses, test_psnrs, test_ssims, test_lpips_alexs, test_lpips_vggs, resume_step)
 
-        if plots:
-            for key, value in plots.items():
-                if key not in frames:
-                    frames[key] = []
-                frames[key].append(value)
+    if config.exp:  # test with exposure control, the model needs to be finetuned with exposure control first
+        if config.random:
+            suffix = "random"
+            for frame, batch in enumerate(testloader):
+                if frame != config.view:
+                    continue
+
+                for i in range(config.num_samples):
+                    print("test seed:", config.seed, "i:", i)
+                    shading_codes = torch.randn(1, args.exposure_control.shading_code_dim, device=device) * config.scale
+                    plots = test_step(frame, i, len(testloader), model, device, dataset, batch, loss_fn, lpips_loss_fn_alex,
+                                    lpips_loss_fn_vgg, args, config, test_losses, test_psnrs, test_ssims, test_lpips_alexs, 
+                                    test_lpips_vggs, resume_step, shading_codes, suffix)
+
+        elif config.intrp:
+            suffix = "intrp"
+            latent_codes = []
+            ids = [config.start_index, config.end_index]
+            for i in range(config.num_samples):
+                print("test seed:", config.seed, "i:", i)
+                shading_codes = torch.randn(1, args.exposure_control.shading_code_dim, device=device) * config.scale
+
+                if i in ids:
+                    latent_codes.append(shading_codes)
+
+            interpolated_codes = []
+            for j in range(config.num_intrp):
+                interpolated_codes.append(latent_codes[0] + (latent_codes[1] - latent_codes[0]) * (j + 1) / config.num_intrp)
+
+            frames = {}
+            for frame, batch in enumerate(testloader):
+                if frame != config.view:
+                    continue
+
+                for i in range(config.num_intrp):
+                    shading_codes = interpolated_codes[i]
+                    plots = test_step(frame, i, len(testloader), model, device, dataset, batch, loss_fn, lpips_loss_fn_alex,
+                                    lpips_loss_fn_vgg, args, config, test_losses, test_psnrs, test_ssims, test_lpips_alexs, 
+                                    test_lpips_vggs, resume_step, shading_codes, suffix)
+
+        else:
+            suffix = "test"
+            shading_code = torch.randn(args.exposure_control.shading_code_dim, device=device) * config.scale
+            for frame, batch in enumerate(testloader):
+                # shading_code = shading_codes[frame]
+                plots = test_step(frame, 0, len(testloader), model, device, dataset, batch, loss_fn, lpips_loss_fn_alex,
+                                lpips_loss_fn_vgg, args, config, test_losses, test_psnrs, test_ssims, test_lpips_alexs, 
+                                test_lpips_vggs, resume_step, shading_code, suffix)
+
+                if plots:
+                    for key, value in plots.items():
+                        if key not in frames:
+                            frames[key] = []
+                        frames[key].append(value)
+
+    else:   # test without exposure control
+        for frame, batch in enumerate(testloader):
+            plots = test_step(frame, len(testloader), model, device, dataset, batch, loss_fn, lpips_loss_fn_alex,
+                            lpips_loss_fn_vgg, args, test_losses, test_psnrs, test_ssims, test_lpips_alexs, test_lpips_vggs, resume_step)
+
+            if plots:
+                for key, value in plots.items():
+                    if key not in frames:
+                        frames[key] = []
+                    frames[key].append(value)
 
     test_loss = np.mean(test_losses)
     test_psnr = np.mean(test_psnrs)
@@ -205,7 +283,7 @@ def test(model, device, dataset, save_name, args, resume_step):
     print(f"Avg test loss: {test_loss:.4f}, test PSNR: {test_psnr:.4f}, test SSIM: {test_ssim:.4f}, test LPIPS Alex: {test_lpips_alex:.4f}, test LPIPS VGG: {test_lpips_vgg:.4f}")
 
 
-def main(args, save_name, mode, resume_step=0):
+def main(config, args, save_name, mode, resume_step=0):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = get_model(args, device)
     dataset = get_dataset(args.dataset, mode=mode)
@@ -215,11 +293,17 @@ def main(args, save_name, mode, resume_step=0):
             model_state_dict = torch.load(args.test.load_path)
             for step, state_dict in model_state_dict.items():
                 resume_step = int(step)
+                if config.exp:
+                    model.train_shading_codes = nn.Parameter(torch.zeros_like(state_dict['train_shading_codes']), requires_grad=False)
+                    model.eval_shading_codes = nn.Parameter(torch.zeros_like(state_dict['eval_shading_codes']), requires_grad=False)
                 model.load_my_state_dict(state_dict)
         except:
             model_state_dict = torch.load(os.path.join(args.save_dir, args.test.load_path, "model.pth"))
             for step, state_dict in model_state_dict.items():
                 resume_step = step
+                if config.exp:
+                    model.train_shading_codes = nn.Parameter(torch.zeros_like(state_dict['train_shading_codes']), requires_grad=False)
+                    model.eval_shading_codes = nn.Parameter(torch.zeros_like(state_dict['eval_shading_codes']), requires_grad=False)
                 model.load_my_state_dict(state_dict)
         print("!!!!! Loaded model from %s at step %s" % (args.test.load_path, resume_step))
     else:
@@ -227,15 +311,33 @@ def main(args, save_name, mode, resume_step=0):
             model_state_dict = torch.load(os.path.join(args.save_dir, args.index, "model.pth"))
             for step, state_dict in model_state_dict.items():
                 resume_step = int(step)
+                if config.exp:
+                    model.train_shading_codes = nn.Parameter(torch.zeros_like(state_dict['train_shading_codes']), requires_grad=False)
+                    model.eval_shading_codes = nn.Parameter(torch.zeros_like(state_dict['eval_shading_codes']), requires_grad=False)
                 model.load_my_state_dict(state_dict)
         except:
-            model.load_my_state_dict(torch.load(os.path.join(args.save_dir, args.index, f"model_{resume_step}.pth")))
+            state_dict = torch.load(os.path.join(args.save_dir, args.index, f"model_{resume_step}.pth"))
+            if config.exp:
+                model.train_shading_codes = nn.Parameter(torch.zeros_like(state_dict['train_shading_codes']), requires_grad=False)
+                model.eval_shading_codes = nn.Parameter(torch.zeros_like(state_dict['eval_shading_codes']), requires_grad=False)
+            model.load_my_state_dict(state_dict)
         print("!!!!! Loaded model from %s at step %s" % (os.path.join(args.save_dir, args.index), resume_step))
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
 
-    test(model, device, dataset, save_name, args, resume_step)
+    shading_codes = None
+    if config.exp:
+        if mode == 'train':
+            shading_codes = model.train_shading_codes
+            print("Using train shading_codes:", shading_codes.shape, shading_codes.min(), shading_codes.max())
+        elif mode == 'test':
+            shading_codes = model.eval_shading_codes
+            print("Using eval shading_codes:", shading_codes.shape, shading_codes.min(), shading_codes.max())
+        else:
+            raise NotImplementedError
+
+    test(model, device, dataset, save_name, args, config, resume_step, shading_codes)
 
 
 if __name__ == '__main__':
@@ -244,6 +346,8 @@ if __name__ == '__main__':
         default_config = yaml.safe_load(f)
 
     args = parse_args()
+    if args.intrp or args.random: assert args.exp, "You need to trun on the exposure control (--exp) for expsoure interpolation or generating images with random exposure levels."
+    assert not args.intrp or not args.random, "Cannot do exposure interpolation and random exposure generation at the same time."
     with open(args.opt, 'r') as f:
         config = yaml.safe_load(f)
 
@@ -268,5 +372,9 @@ if __name__ == '__main__':
         mode = dataset['mode']
         print(name, dataset)
         test_config['dataset'].update(dataset)
-        args = DictAsMember(test_config)
-        main(args, name, mode, resume_step)
+        test_config = DictAsMember(test_config)
+
+        if args.exp:
+            assert test_config.models.use_renderer, "Currently only support using renderer for exposure control"
+
+        main(args, test_config, name, mode, resume_step)

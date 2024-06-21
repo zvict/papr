@@ -21,21 +21,6 @@ from dataset import get_dataset, get_loader
 from models import get_model, get_loss
 
 
-class DictAsMember(dict):
-    def __getattr__(self, name):
-        value = self[name]
-        if isinstance(value, dict):
-            value = DictAsMember(value)
-        return value
-
-
-def setup_seed(seed):
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-
-
 def parse_args():
     parser = argparse.ArgumentParser(description="PAPR")
     parser.add_argument('--opt', type=str, default="", help='Option file path')
