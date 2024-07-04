@@ -255,8 +255,9 @@ def test(model, device, dataset, save_name, args, config, resume_step, shading_c
 
     else:   # test without exposure control
         for frame, batch in enumerate(testloader):
-            plots = test_step(frame, len(testloader), model, device, dataset, batch, loss_fn, lpips_loss_fn_alex,
-                            lpips_loss_fn_vgg, args, test_losses, test_psnrs, test_ssims, test_lpips_alexs, test_lpips_vggs, resume_step)
+            plots = test_step(frame, 0, len(testloader), model, device, dataset, batch, loss_fn, lpips_loss_fn_alex,
+                            lpips_loss_fn_vgg, args, config, test_losses, test_psnrs, test_ssims, test_lpips_alexs, 
+                            test_lpips_vggs, resume_step)
 
             if plots:
                 for key, value in plots.items():
