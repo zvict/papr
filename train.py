@@ -31,7 +31,7 @@ def eval_step(steps, model, device, dataset, eval_dataset, batch, loss_fn, train
     train_img_idx, _, train_patch, _, _  = batch
     train_img, train_rayd, train_rayo = dataset.get_full_img(train_img_idx[0])
     img, rayd, rayo = eval_dataset.get_full_img(args.eval.img_idx)
-    c2w = dataset.get_c2w(args.eval.img_idx)
+    c2w = eval_dataset.get_c2w(args.eval.img_idx)
     
     N, H, W, _ = rayd.shape
     num_pts, _ = model.points.shape
