@@ -20,13 +20,13 @@ def load_blender_data(basedir, split='train', factor=1, read_offline=True):
 
         if read_offline:
             img = imageio.imread(img_path)
-            W, H = img.shape[:2]
+            H, W = img.shape[:2]
             if factor > 1:
                 img = Image.fromarray(img).resize((W//factor, H//factor))
             images.append((np.array(img) / 255.).astype(np.float32))
         elif i == 0:
             img = imageio.imread(img_path)
-            W, H = img.shape[:2]
+            H, W = img.shape[:2]
             if factor > 1:
                 img = Image.fromarray(img).resize((W//factor, H//factor))
             images.append((np.array(img) / 255.).astype(np.float32))
