@@ -670,7 +670,6 @@ if TRAIN_DEFORM_NET:
         title=f"Total Final Deformed Point Cloud",
     )
 
-
 """ 
 Deform the point cloud
 """
