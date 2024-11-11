@@ -130,9 +130,9 @@ def test_step(frame, num_frames, model, device, dataset, batch, loss_fn, lpips_l
         cur_depth *= (65536 / 10)
         cur_depth = cur_depth.astype(np.uint16)
         imageio.imwrite(os.path.join(log_dir, "test-{:04d}-predrgb-PSNR{:.3f}-SSIM{:.4f}-LPIPSA{:.4f}-LPIPSV{:.4f}.png".format(frame, test_psnr, test_ssim, test_lpips_alex, test_lpips_vgg)), (rgb.squeeze().detach().cpu().numpy() * 255).astype(np.uint8))
-        imageio.imwrite(os.path.join(log_dir, "test-{:04d}-depth-PSNR{:.3f}-SSIM{:.4f}-LPIPSA{:.4f}-LPIPSV{:.4f}.png".format(frame, test_psnr, test_ssim, test_lpips_alex, test_lpips_vgg)), cur_depth)
-        imageio.imwrite(os.path.join(log_dir, "test-{:04d}-fgrgb-PSNR{:.3f}-SSIM{:.4f}-LPIPSA{:.4f}-LPIPSV{:.4f}.png".format(frame, test_psnr, test_ssim, test_lpips_alex, test_lpips_vgg)), (foreground_rgb.clamp(0, 1).detach().cpu().numpy() * 255).astype(np.uint8))
-        imageio.imwrite(os.path.join(log_dir, "test-{:04d}-bkgmask-PSNR{:.3f}-SSIM{:.4f}-LPIPSA{:.4f}-LPIPSV{:.4f}.png".format(frame, test_psnr, test_ssim, test_lpips_alex, test_lpips_vgg)), (bkg_mask.detach().cpu().numpy() * 255).astype(np.uint8))
+        # imageio.imwrite(os.path.join(log_dir, "test-{:04d}-depth-PSNR{:.3f}-SSIM{:.4f}-LPIPSA{:.4f}-LPIPSV{:.4f}.png".format(frame, test_psnr, test_ssim, test_lpips_alex, test_lpips_vgg)), cur_depth)
+        # imageio.imwrite(os.path.join(log_dir, "test-{:04d}-fgrgb-PSNR{:.3f}-SSIM{:.4f}-LPIPSA{:.4f}-LPIPSV{:.4f}.png".format(frame, test_psnr, test_ssim, test_lpips_alex, test_lpips_vgg)), (foreground_rgb.clamp(0, 1).detach().cpu().numpy() * 255).astype(np.uint8))
+        # imageio.imwrite(os.path.join(log_dir, "test-{:04d}-bkgmask-PSNR{:.3f}-SSIM{:.4f}-LPIPSA{:.4f}-LPIPSV{:.4f}.png".format(frame, test_psnr, test_ssim, test_lpips_alex, test_lpips_vgg)), (bkg_mask.detach().cpu().numpy() * 255).astype(np.uint8))
 
     plots = {}
 

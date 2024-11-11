@@ -50,6 +50,10 @@ class PAPR(nn.Module):
                 points = self._sphere_pc(pt_init_center, point_opt.num, pt_init_scale)
             elif point_opt.init_type == 'cube': # initial points in a cube
                 points = self._cube_normal_pc(pt_init_center, point_opt.num, pt_init_scale)
+            elif point_opt.init_type == "norm-cube":
+                points = self._cube_normal_pc(
+                    pt_init_center, point_opt.num, pt_init_scale
+                )
             else:
                 raise NotImplementedError("Point init type [{:s}] is not found".format(point_opt.init_type))
             print("Initialized points scale: ", points[:, 0].min(), points[:, 0].max(), points[:, 1].min(), points[:, 1].max(), points[:, 2].min(), points[:, 2].max())
@@ -317,7 +321,7 @@ class PAPR(nn.Module):
 
         dists_to_rays = torch.norm(D, dim=-1, keepdim=True)
         proj_dists = torch.norm(proj, dim=-1, keepdim=True)
-        
+
         return proj_dists, dists_to_rays, proj, D
 
     def _get_points(self, rays_o, rays_d, c2w, step=-1):
@@ -340,7 +344,7 @@ class PAPR(nn.Module):
             select_k_ind = self._calculate_global_distances(rays_o, rays_d, points)   # (N, H, W, num_pts)
         selected_points = points[select_k_ind, :]  # (N, H, W, select_k, 3)
         self.selected_points = selected_points
-        
+
         return selected_points, select_k_ind
 
     def prune_points(self, thresh):
@@ -380,7 +384,7 @@ class PAPR(nn.Module):
 
         if self.use_pc_feats:
             point_features = self.pc_feats.detach().cpu()
-        
+
         new_points, num_new_points, new_influ_scores, new_point_features = add_points_knn(points, self.points_influ_scores.detach().cpu(), add_num=add_num,
                                                                                             k=self.args.geoms.points.add_k, comb_type=self.args.geoms.points.add_type,
                                                                                             sample_k=self.args.geoms.points.add_sample_k, sample_type=self.args.geoms.points.add_sample_type,
@@ -408,12 +412,14 @@ class PAPR(nn.Module):
         """
         Get the key, query, value for the proximity attention layer(s)
         """
-        _, _, vec_p2o, vec_p2r = self._calculate_distances(rays_o, rays_d, points, c2w)
+        pd, d2r, vec_p2o, vec_p2r = self._calculate_distances(rays_o, rays_d, points, c2w)
 
         k_type = self.args.models.transformer.k_type
         k_L = self.args.models.transformer.embed.k_L
         if k_type == 1:
             key = [points.detach(), vec_p2o, vec_p2r]
+        elif k_type == 2:
+            key = [d2r]
         else:
             raise ValueError('Invalid key type')
         assert len(key) == (len(k_L))
@@ -422,6 +428,8 @@ class PAPR(nn.Module):
         q_L = self.args.models.transformer.embed.q_L
         if q_type == 1:
             query = [rays_d.unsqueeze(-2)]
+        elif q_type == 2:
+            query = [torch.ones_like(rays_d).unsqueeze(-2)]
         else:
             raise ValueError('Invalid query type')
         assert len(query) == (len(q_L))
@@ -430,6 +438,8 @@ class PAPR(nn.Module):
         v_L = self.args.models.transformer.embed.v_L
         if v_type == 1:
             value = [vec_p2o, vec_p2r]
+        elif v_type == 2:
+            value = [pd, d2r]
         else:
             raise ValueError('Invalid value type')
         assert len(value) == (len(v_L))
@@ -545,13 +555,14 @@ class PAPR(nn.Module):
 
             if self.args.models.use_renderer:
                 foreground = self.renderer(fused_features.permute(0, 3, 1, 2), gamma=gamma, beta=beta).permute(0, 2, 3, 1).unsqueeze(-2)   # (N, H, W, 1, 3)
-                if self.args.models.normalize_topk_attn:
-                    rgb = foreground * (1 - bkg_attn) + self.bkg_feats.expand(N, H, W, -1, -1) * bkg_attn
-                else:
-                    rgb = foreground + self.bkg_feats.expand(N, H, W, -1, -1) * bkg_attn
-                rgb = rgb.squeeze(-2)
             else:
-                rgb = fused_features
+                foreground = fused_features.unsqueeze(-2)
+
+            if self.args.models.normalize_topk_attn:
+                rgb = foreground * (1 - bkg_attn) + self.bkg_feats.expand(N, H, W, -1, -1) * bkg_attn
+            else:
+                rgb = foreground + self.bkg_feats.expand(N, H, W, -1, -1) * bkg_attn
+            rgb = rgb.squeeze(-2)
         else:
             attn = F.softmax(scores, dim=3)
             fused_features = torch.sum(embedv * attn, dim=3)   # (N, H, W, C)
@@ -565,7 +576,7 @@ class PAPR(nn.Module):
                   fused_features.max().item(), fused_features.mean().item(), fused_features.std().item())
             print(' predict rgb:', step, rgb.shape, rgb.min().item(),
                   rgb.max().item(), rgb.mean().item(), rgb.std().item())
-            
+
         return rgb
 
     def save(self, step, save_dir):
@@ -589,7 +600,7 @@ class PAPR(nn.Module):
                 schedulers_state_dict[name] = None
         torch.save(schedulers_state_dict, os.path.join(
             save_dir, 'schedulers.pth'))
-        
+
         scaler_state_dict = self.scaler.state_dict()
         torch.save(scaler_state_dict, os.path.join(
             save_dir, 'scaler.pth'))
@@ -632,7 +643,7 @@ class PAPR(nn.Module):
                     print("exclude", name)
                     break
             else:
-                if name not in ['points', 'points_influ_scores', 'pc_feats']:
+                if name not in ["points", "points_influ_scores", "pc_feats"]:
                     if isinstance(param, nn.Parameter):
                         # backwards compatibility for serialized parameters
                         param = param.data

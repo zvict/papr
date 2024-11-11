@@ -9,16 +9,19 @@ from .utils import PoseEnc, activation_func
 def get_transformer(args, seq_len, v_extra_dim=0, k_extra_dim=0, q_extra_dim=0, eps=1e-6, use_amp=False, amp_dtype=torch.float16):
     k_dim_map = {
         1: [3, 3, 3],
+        2: [1],
     }
     k_dim = k_dim_map[args.k_type]
 
     q_dim_map = {
         1: [3],
+        2: [3],
     }
     q_dim = q_dim_map[args.q_type]
 
     v_dim_map = {
         1: [3, 3],
+        2: [1, 1],
     }
     v_dim = v_dim_map[args.v_type]
 

@@ -81,25 +81,27 @@ def eval_step(steps, model, device, dataset, eval_dataset, batch, loss_fn, train
         
         if args.models.use_renderer:
             foreground_rgb = model.renderer(feature_map.squeeze(-2).permute(0, 3, 1, 2)).permute(0, 2, 3, 1).unsqueeze(-2)   # (N, H, W, 1, 3)
-            if model.bkg_feats is not None:
-                bkg_attn = attn[..., topk:, :]
-                if args.models.normalize_topk_attn:
-                    rgb = foreground_rgb * (1 - bkg_attn) + model.bkg_feats.expand(N, H, W, -1, -1) * bkg_attn
-                else:
-                    rgb = foreground_rgb + model.bkg_feats.expand(N, H, W, -1, -1) * bkg_attn
-                rgb = rgb.squeeze(-2)
-            else:
-                rgb = foreground_rgb.squeeze(-2)
         else:
-            rgb = feature_map.squeeze(-2)
+            foreground_rgb = feature_map
+            
+        if model.bkg_feats is not None:
+            bkg_attn = attn[..., topk:, :]
+            if args.models.normalize_topk_attn:
+                rgb = foreground_rgb * (1 - bkg_attn) + model.bkg_feats.expand(N, H, W, -1, -1) * bkg_attn
+            else:
+                rgb = foreground_rgb + model.bkg_feats.expand(N, H, W, -1, -1) * bkg_attn
+            rgb = rgb.squeeze(-2)
+        else:
+            rgb = foreground_rgb.squeeze(-2)
+        
                 
         rgb = model.last_act(rgb)
         rgb = torch.clamp(rgb, 0, 1)
 
-        eval_loss = loss_fn(rgb, img)
-        eval_psnr = -10. * np.log(((rgb - img)**2).mean().item()) / np.log(10.)
+    eval_loss = loss_fn(rgb, img)
+    eval_psnr = -10. * np.log(((rgb - img)**2).mean().item()) / np.log(10.)
 
-        model.clear_grad()
+    model.clear_grad()
 
     eval_losses.append(eval_loss.item())
     eval_psnrs.append(eval_psnr.item())

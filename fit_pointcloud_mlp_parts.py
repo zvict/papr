@@ -760,13 +760,14 @@ if REG_DEFORM_NET:
     # kp_knn_body = 5
     # kp_knn_body = 50
     # kp_knn = 20
+    motion_frame_skip = 200
     kp_knn_body = 20
     # num_keypoints = 1024
     # kp_knn = 5
     total_part_num = 2
 
-    test_transform_net = True
-    # test_transform_net = False
+    # test_transform_net = True
+    test_transform_net = False
 
     transform_L = 0
     loss_type = "L1_fix"
@@ -775,7 +776,7 @@ if REG_DEFORM_NET:
         if use_keypoints:
             cur_log_dir = os.path.join(
                 log_dir,
-                f"transform_wing_kp_{num_keypoints}_body_kp_{num_keypoints_body}_kpnn_{kp_knn}_bodykpnn_{kp_knn_body}_cdw{cd_loss_w}_rigidw{rigid_loss_w}_ldasw{ldas_loss_w}_nn{num_nn}_concat_{input_case}",
+                f"transform_wing_kp_{num_keypoints}_body_kp_{num_keypoints_body}_kpnn_{kp_knn}_bodykpnn_{kp_knn_body}_frame_skip_{motion_frame_skip}_cdw{cd_loss_w}_rigidw{rigid_loss_w}_ldasw{ldas_loss_w}_nn{num_nn}_concat_{input_case}",
                 # f"test_deformed_pc",
             )
             # cur_log_dir = os.path.join(
@@ -830,7 +831,7 @@ if REG_DEFORM_NET:
 
     start = 0
     end = 30001
-    interval = 1000
+    interval = motion_frame_skip
 
     src_pcs = [[] for _ in range(total_part_num)]
     deformed_pcs = [[] for _ in range(total_part_num)]
@@ -981,7 +982,8 @@ if REG_DEFORM_NET:
     if USE_POINTNET:
         del pointnet
 
-    sample_steps = torch.arange(0, num_steps + 1, 5)
+    sample_skip = num_steps // 6
+    sample_steps = torch.arange(0, num_steps + 1, sample_skip)
 
     if use_keypoints:
         pred_deformed_pcs = []
@@ -1099,7 +1101,7 @@ if REG_DEFORM_NET:
 
     def visualize_time_steps(pc_images, cur_log_dir, num_steps, cur_iter):
         with torch.no_grad():
-            sample_steps = torch.arange(0, num_steps + 1, 5)
+            # sample_steps = torch.arange(0, num_steps + 1, 5)
 
             total_deformed_pc = []
 
@@ -1553,36 +1555,37 @@ if REG_DEFORM_NET:
                 #     .sum(dim=1)
                 # ).mean()
 
-                avg_displacement = (
-                    cur_deformed_src_pcs.view(num_pts[part_idx], 1, 3)
-                    .expand(num_pts[part_idx], num_nn, 3)
-                    .gather(
-                        0,
-                        nn_indices[part_idx][:, :num_nn]
-                        .to(device)
-                        .unsqueeze(-1)
-                        .expand(num_pts[part_idx], num_nn, 3),
-                    )
-                    - nn_init_positions[part_idx]
-                    .view(num_pts[part_idx], 1, 3)
-                    .expand(num_pts[part_idx], num_pts[part_idx], 3)
-                    .gather(
-                        0,
-                        nn_indices[part_idx][:, :num_nn]
-                        .to(device)
-                        .unsqueeze(-1)
-                        .expand(num_pts[part_idx], num_nn, 3),
-                    )
-                ).mean(dim=1)
-                avg_displacement_loss = (
-                    (
-                        cur_deformed_src_pcs
-                        - (avg_displacement + nn_init_positions[part_idx])
-                    )
-                    .pow(2)
-                    .sum(dim=1)
-                ).mean()
-                total_reg_loss += avg_displacement_loss * ldas_loss_w
+                # ====================== try this version ======================
+                # avg_displacement = (
+                #     cur_deformed_src_pcs.view(num_pts[part_idx], 1, 3)
+                #     .expand(num_pts[part_idx], num_nn, 3)
+                #     .gather(
+                #         0,
+                #         nn_indices[part_idx][:, :num_nn]
+                #         .to(device)
+                #         .unsqueeze(-1)
+                #         .expand(num_pts[part_idx], num_nn, 3),
+                #     )
+                #     - nn_init_positions[part_idx]
+                #     .view(num_pts[part_idx], 1, 3)
+                #     .expand(num_pts[part_idx], num_pts[part_idx], 3)
+                #     .gather(
+                #         0,
+                #         nn_indices[part_idx][:, :num_nn]
+                #         .to(device)
+                #         .unsqueeze(-1)
+                #         .expand(num_pts[part_idx], num_nn, 3),
+                #     )
+                # ).mean(dim=1)
+                # avg_displacement_loss = (
+                #     (
+                #         cur_deformed_src_pcs
+                #         - (avg_displacement + nn_init_positions[part_idx])
+                #     )
+                #     .pow(2)
+                #     .sum(dim=1)
+                # ).mean()
+                # total_reg_loss += avg_displacement_loss * ldas_loss_w
 
                 # ==== add the displacement regularizer ====
                 # Design 1: preserve the distance that each point in src travels
@@ -1611,3 +1614,5 @@ if REG_DEFORM_NET:
         transform_net.state_dict(), os.path.join(cur_log_dir, "transform_net.pth")
     )
     imageio.mimsave(os.path.join(cur_log_dir, 'train_deformed_pc.mp4'), pc_images, fps=10)
+    # save the deformed pcs
+    save_all_deformed_pcs()

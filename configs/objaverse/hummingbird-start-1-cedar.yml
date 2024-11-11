@@ -1,0 +1,350 @@
+index: "hummingbird-start-1"
+train: true
+load_path: ""
+save_dir: "./experiments"
+seed: 1
+eps: 1.0e-6
+use_amp: false
+amp_dtype: "float16"
+scaler_init_scale: 65536.0
+scaler_growth_interval: 4000
+scaler_enabled: false
+scaler_min_scale: -1.0
+max_pts: 30000
+dataset:
+  mode: "train"
+  coord_scale: 10.0
+  type: "synthetic"
+  white_bg: true
+  path: "/NAS/spa176/data/Objaverse/hummingbird/start/"
+  factor: 1
+  batch_size: 1
+  num_workers: 0
+  shuffle: true
+  extract_patch: true
+  extract_online: true
+  read_offline: false
+  patches:
+    type: "random"
+    height: 160
+    width: 160
+    overlap: 10
+    max_patches: 10
+  # rays:
+  #   focal_factor: 1.0
+  #   cam_world: 'world'
+geoms:
+  points:
+    select_k: 20
+    select_k_type: "d2r"
+    select_k_sorted: false
+    # select_k_factor: 2
+    # sample_k: 20
+    # sample_k_factor: 1.0
+    # sample_k_type: "uniform"
+    load_path: ""
+    init_type: "norm-cube"
+    init_scale: [0.5, 0.5, 0.5]
+    init_center: [0.0, 0.0, 0.0]
+    num: 3000
+    conf_type: 1
+    influ_init_val: 0.0
+    add_type: "random"
+    add_k: 3
+    add_sample_type: "top-knn-std"
+    add_sample_k: 10
+  background:
+    use_bkg_feat: true
+    type: 1
+    load_path: ""
+    learnable: false
+    init_type: "ones"
+    init_scale: 1.0
+    seq_len: 1
+    constant: 5.0
+  point_feats:
+    dim: 64 # dimension of the point features
+    use_inv: true # use as a value feature in the attention layer
+    use_ink: false  # use as a key feature in the attention layer
+    use_inq: false
+    # type: "learnable"
+    # load_path: ""
+    # dim: 64
+    # factor: 1.0
+    # sh_degree: 3
+    # use_inv: true
+    # use_ink: false
+    # use_inq: false
+    # online: false
+    # mv_model: # used if type is "mv"
+    #   backbone: "resnet18"
+    #   feat_size: 16
+    #   last_extract_layer: -2
+    #   translation: -1.7
+    #   pre_scale: False
+    #   resolution: 128
+    #   upscale_feats: False
+    #   img_pixel_size: 6
+    #   feat_pixel_size: 1
+models:
+  out_fuse_type: 1
+  use_renderer: true
+  last_act: "none"
+  normalize_topk_attn: true
+  shading_code_dim: 128
+  shading_code_scale: 1.0
+  shading_code_num_samples: 20
+  shading_code_resample_iter: 5000
+  sftmax_temp: 1.0
+  mapping_mlp:
+    use: false
+    num_layers: 3
+    dim: 256
+    act: "relu"
+    last_act: "none"
+    use_wn: false
+    out_dim: 64
+  transformer:
+    d_model: 256
+    d_out: 256
+    k_type: 1
+    q_type: 1
+    v_type: 1
+    embed:
+      embed_type: 1
+      share_embed: false
+      k_L: [6, 6, 6]
+      q_L: [6]
+      v_L: [6, 6]
+      dropout: 0.0
+      temperature: 1.0
+      gamma: 10.0
+      pe_factor: 2.0
+      pe_mult_factor: 1.0
+      pe_type: "none"
+      pe_init_std: 0.2
+      key:
+        d_ff: 256
+        d_ff_out: 256
+        n_ff_layer: 5
+        ff_act: "leakyrelu"
+        ff_act_a: 1.0
+        ff_act_b: 1.0
+        ff_act_trainable: false
+        ff_last_act: "none"
+        norm: "layernorm"
+        dropout_ff: 0.0
+        use_wn: false
+        residual_ff: false
+        skip_layers: []
+        half_layers: []
+        residual_layers: []
+        residual_dims: []
+      query:
+        d_ff: 256
+        d_ff_out: 256
+        n_ff_layer: 5
+        ff_act: "leakyrelu"
+        ff_act_a: 1.0
+        ff_act_b: 1.0
+        ff_act_trainable: false
+        ff_last_act: "none"
+        norm: "layernorm"
+        dropout_ff: 0.0
+        use_wn: false
+        residual_ff: false
+        skip_layers: []
+        half_layers: []
+        residual_layers: []
+        residual_dims: []
+      value:
+        d_ff: 256
+        d_ff_out: 32
+        n_ff_layer: 8
+        ff_act: "leakyrelu"
+        ff_act_a: 1.0
+        ff_act_b: 1.0
+        ff_act_trainable: false
+        ff_last_act: "none"
+        norm: "none"
+        dropout_ff: 0.0
+        use_wn: false
+        residual_ff: false
+        skip_layers: [5]
+        half_layers: []
+        residual_layers: []
+        residual_dims: []
+      d_ff: 256
+      d_ff_out: 256
+      n_ff_layer: 5
+      ff_act: "relu"
+      ff_act_a: 1.0
+      ff_act_b: 1.0
+      ff_act_trainable: false
+      ff_last_act: "none"
+      norm: "layernorm"
+      dropout_ff: 0.0
+      use_wn: false
+      residual_ff: false
+    block:
+      n_head: 1
+      n_block: 1
+      score_act: "relu"
+      k_act: "none"
+      q_act: "none"
+      transform_kq: true
+      temperature: 1.0
+      dropout_attn: 0.0
+      dropout_ff: 0.0
+      residual_attn: true
+      residual_ff: true
+      d_ff: 256
+      n_ff_layer: 2
+      ff_act: "relu"
+      ff_act_a: 1.0
+      ff_act_b: 1.0
+      ff_act_trainable: false
+      ff_last_act: "none"
+      norm: "layernorm"
+      use_wn: false
+  # renderer:
+  #   generator:
+  #     type: "snp-small-unet"
+  #     unet:
+  #       num_layers: 4
+  #       n_midchannels: 256
+  #       bilinear: true
+  #       use_bn: false
+  #       pooling: "avg"
+  #       use_gated: true
+  #       last_act: "tanh"
+  #     snp_small_unet:
+  #       bilinear: false
+  #       norm: "none"
+  #       single: true
+  #       last_act: "none"
+  #       affine_layer: -1
+  renderer: # the UNet
+    generator:
+      type: "small-unet"
+      small_unet:
+        bilinear: false
+        norm: "none"
+        single: true
+        last_act: "none"
+        affine_layer: -1
+training:
+  steps: 250000
+  score_step: 250001
+  bkg_step: 250001
+  prune_steps: 500
+  prune_start: 10000
+  prune_stop: 150000
+  prune_thresh: -0.0
+  prune_thresh_list: []
+  prune_steps_list: []
+  prune_type: "<"
+  select_k_factor: -1
+  sample_k_factor: -1
+  add_steps: 1000
+  add_start: 20000
+  add_stop: 70000
+  add_num: 1000
+  add_num_list: []
+  add_steps_list: []
+  exclude_keys: []
+  fix_keys: [
+    # "points",
+    # "pc_norms",
+    # # "norm_mlp",
+    # "transformer",
+    # "pc_feats",
+    # "attn_mlp",
+    # # "renderer",
+    # # "bkg_feats",
+    # "bkg_points",
+    # "points_conf_scores"
+    ]
+  losses:
+    mse: 1.0
+    lpips: 1.0e-2
+    lpips_alex: 0.0
+  lr:
+    lr_factor: 1.0
+    mapping_mlp:
+      type: "none"
+      base_lr: 1.0e-6
+      factor: 1
+      warmup: 10000
+      weight_decay: 0
+    transformer:
+      type: "cosine-hlfperiod"
+      base_lr: 3.0e-4
+      factor: 1
+      warmup: 10000
+      weight_decay: 0
+    points:
+      type: "cosine"
+      base_lr: 1.5e-3
+      factor: 1
+      warmup: 0
+      weight_decay: 0
+    bkg_feats:
+      type: "none"
+      base_lr: 0.0
+      factor: 1
+      warmup: 10000
+      weight_decay: 0
+    points_influ_scores:
+      type: "cosine-hlfperiod"
+      base_lr: 1.0e-3
+      factor: 1
+      warmup: 10000
+      weight_decay: 0
+    feats: 
+      type: "cosine-hlfperiod"
+      base_lr: 1.0e-3
+      factor: 1
+      warmup: 10000
+      weight_decay: 0
+    generator:
+      type: "cosine-hlfperiod"
+      base_lr: 1.0e-4
+      factor: 1
+      warmup: 10000
+      weight_decay: 0
+eval:
+  dataset:
+    name: "testset"
+    mode: "test"
+    extract_patch: false
+    type: "synthetic"
+    white_bg: true
+    path: "/NAS/spa176/data/Objaverse/butterfly/end/"
+    factor: 2
+    num_workers: 0
+    num_slices: -1
+  step: 5000
+  img_idx: 3
+  max_height: 100
+  max_width: 100
+  save_fig: true
+test:
+  load_path: ""
+  max_height: 100
+  max_width: 100
+  save_fig: true  # save the log images during testing
+  save_video: true # save the video during testing
+  datasets:
+    - name: "testset"
+      mode: "test"
+      extract_patch: false
+      type: "synthetic"
+      white_bg: true
+      path: "/NAS/spa176/data/Objaverse/butterfly/end/"
+      factor: 2
+      num_workers: 0
+      num_slices: -1
+  plots:
+    pcrgb: true
+    featattn: false
