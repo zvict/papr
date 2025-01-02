@@ -277,7 +277,7 @@ def train_and_eval(start_step, model, device, dataset, eval_dataset, losses, arg
                 avg_train_loss = 0.
                 eval_step_cnt = 0
 
-            if ((step - 1) % 200 == 0) and args.eval.save_fig:
+            if (((step - 1) % 200 == 0) or (step == 0)) and args.eval.save_fig:
                 coord_scale = args.dataset.coord_scale
                 pt_plot_scale = 0.8 * coord_scale
                 if "Barn" in args.dataset.path:

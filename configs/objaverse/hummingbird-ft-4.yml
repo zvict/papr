@@ -1,6 +1,6 @@
-index: "hummingbird-ft-1"
+index: "hummingbird-ft-4"
 train: true
-load_path: "hummingbird-ft-1"
+load_path: "hummingbird-ft-4"
 save_dir: "./experiments"
 seed: 1
 eps: 1.0e-6

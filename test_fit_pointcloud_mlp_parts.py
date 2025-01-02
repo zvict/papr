@@ -33,7 +33,6 @@ from pointnet2_utils import (
 from pointnet_utils import STN3d, STNkd, feature_transform_reguliarzer
 from sklearn.neighbors import NearestNeighbors
 from scipy.spatial import KDTree
-os.chdir("/NAS/spa176/papr-retarget")
 
 
 class pointnet2(nn.Module):
@@ -452,11 +451,8 @@ def parametertize_pc(points, keypoints, num_knn, step=50000):
 
 
 USE_ICP = True
-# USE_FPS = False
-USE_FPS = True
+USE_FPS = False
 # TRAIN_DEFORM_NET = True
-TRAIN_DEFORM_NET = False
-TEST_DEFORM_NET = False
 REG_DEFORM_NET = True
 # REG_DEFORM_NET = False
 # TEST_REG_DEFORM_NET = True
@@ -466,16 +462,11 @@ DENSIFY_BODY = True
 CONCAT_POS_DEFORM = True
 
 
-# fps_k = 1000
-num_keypoints = 192
-num_keypoints_body = 96
+fps_k = 1000
 scale = 10.0
 num_layers = 3
-# num_layers = 4
 hidden_dim = 256
 L = 8
-# L = 4
-# L = 10
 # L = 0
 log_dir = "fit_pointcloud_logs"
 if USE_POINTNET:
@@ -489,19 +480,12 @@ if USE_POINTNET:
         exp_dir += "_densify"
     if CONCAT_POS_DEFORM:
         exp_dir += "_concat"
-    if USE_FPS:
-        exp_dir += "_fps"
-    if num_layers != 3:
-        exp_dir += f"_layers{num_layers}"
 else:
     exp_dir = f"multi_mlp_icp_shift_pe{L}"
 # exp_dir = f'learn_mlp_icp_shift_pe{L}_pointnet'
 log_dir = os.path.join(log_dir, exp_dir)
 if not os.path.exists(log_dir):
     os.makedirs(log_dir, exist_ok=True)
-save_img_dir = os.path.join(log_dir, "images")
-if not os.path.exists(save_img_dir):
-    os.makedirs(save_img_dir, exist_ok=True)
 
 src_pc_path = "/NAS/spa176/papr-retarget/point_clouds/butterfly/points_0.npy"
 tgt_pc_path = "/NAS/spa176/papr-retarget/point_clouds/hummingbird/points_0.npy"
@@ -522,6 +506,13 @@ tgt_pc = tgt_pc / scale
 # tgt_pc = tgt_pc[torch.randperm(tgt_pc.shape[0])]
 print("src_pc: ", src_pc.shape, src_pc.min(), src_pc.max())
 print("tgt_pc: ", tgt_pc.shape, tgt_pc.min(), tgt_pc.max())
+
+if USE_FPS:
+    # FPS
+    src_pc = sfp(src_pc.unsqueeze(0), K=fps_k)[0].squeeze(0)
+    tgt_pc = sfp(tgt_pc.unsqueeze(0), K=fps_k)[0].squeeze(0)
+    print("src_pc: ", src_pc.shape, src_pc.min(), src_pc.max())
+    print("tgt_pc: ", tgt_pc.shape, tgt_pc.min(), tgt_pc.max())
 
 # Plot the point clouds
 plot_pointcloud(src_pc, log_dir, title="Source Point Cloud")
@@ -567,276 +558,6 @@ bird_body_indices = np.setdiff1d(np.arange(len(tgt_pc)), bird_wing_indices)
 
 # deform_points = torch.full(src_pc.shape, 0.0, device=device, requires_grad=True)
 
-if TRAIN_DEFORM_NET:
-    total_result = []
-    total_kp_result = []
-    if USE_POINTNET:
-        pointnet = pointnet(normal_channel=False).to(device)
-        checkpoint = torch.load("best_model.pth")
-        pointnet.load_state_dict(checkpoint["model_state_dict"])
-        pointnet.eval()
-
-        # if DENSIFY_BODY:
-        #     # add points to the body of cur_src_pc by inserting one point between each pair of nearest neighbors
-        #     cur_src_pc = src_pc[but_body_indices]
-        #     cur_src_pc_np = cur_src_pc.cpu().numpy()
-        #     tree = KDTree(cur_src_pc_np)
-        #     nn_dists, nn_inds = tree.query(cur_src_pc_np, k=2)
-        #     new_points = (cur_src_pc[nn_inds].sum(1) / 2)
-        #     src_pc = torch.cat([src_pc, new_points], 0)
-
-        with torch.no_grad():
-            point_feat = pointnet(
-                pc_normalize(src_pc).unsqueeze(0).transpose(2, 1)
-            ).transpose(2, 1)[0]
-
-    # for part_idx in range(2):
-    # for part_idx in range(1, 2):
-    for part_idx in range(1):
-
-        if USE_POINTNET:
-            if CONCAT_POS_DEFORM:
-                net = DeformNet(2048, 3, hidden_dim=hidden_dim, num_layers=num_layers, L=L, pt_dim=3).to(
-                    device
-                )
-            else:
-                net = DeformNet(2048, 3, hidden_dim=hidden_dim, num_layers=num_layers, L=L).to(
-                    device
-                )
-        else:
-            net = DeformNet(3, 3, hidden_dim=hidden_dim, num_layers=num_layers, L=L).to(device)
-
-        if part_idx == 0:
-            cur_src_pc = src_pc[but_wing_indices]
-            cur_point_feat = point_feat[but_wing_indices]
-            cur_tgt_pc = tgt_pc[bird_wing_indices]
-            if USE_FPS:
-                # FPS
-                cur_src_kp, src_kp_idx = sfp(cur_src_pc.unsqueeze(0), K=num_keypoints)
-                # cur_src_kp = cur_src_kp.squeeze(0)
-                cur_kp_feat = cur_point_feat[src_kp_idx]
-                cur_tgt_kp = sfp(cur_tgt_pc.unsqueeze(0), K=num_keypoints)[0]
-        else:
-            if DENSIFY_BODY:
-                cur_idx = but_body_indices_concat
-            else:
-                cur_idx = but_body_indices
-                # but_body_indices = np.setdiff1d(np.arange(len(src_pc)), but_wing_indices)
-            cur_src_pc = src_pc[cur_idx]
-            cur_point_feat = point_feat[cur_idx]
-            # bird_body_indices = np.setdiff1d(np.arange(len(tgt_pc)), bird_wing_indices)
-            cur_tgt_pc = tgt_pc[bird_body_indices]
-            if USE_FPS:
-                # FPS
-                cur_src_kp, src_kp_idx = sfp(
-                    src_pc[but_body_indices].unsqueeze(0), K=num_keypoints_body
-                )
-                # cur_src_kp = cur_src_kp.squeeze(0)
-                cur_kp_feat = cur_point_feat[src_kp_idx]
-                cur_tgt_kp = sfp(cur_tgt_pc.unsqueeze(0), K=num_keypoints_body)[
-                    0
-                ]
-            # if DENSIFY_BODY:
-            #     # add points to the body of cur_src_pc by inserting one point between each pair of nearest neighbors
-            #     cur_src_pc_np = cur_src_pc.cpu().numpy()
-            #     tree = KDTree(cur_src_pc_np)
-            #     nn_dists, nn_inds = tree.query(cur_src_pc_np, k=2)
-            #     new_points = (cur_src_pc[nn_inds].sum(1) / 2).cpu()
-            #     cur_src_pc = torch.cat([cur_src_pc, new_points], 0)
-
-        # optimizer = torch.optim.Adam([deform_points], lr=0.001)
-        # lrt = 0.0005 if part_idx == 0 else 0.0001
-        lrt = 0.0001
-        # l2_lambda = 0.000001  # Regularization strength
-        l2_lambda = 0.0  # Regularization strength
-        optimizer = torch.optim.Adam(net.parameters(), lr=lrt)
-        pc_images = []
-        kp_images = []
-        n_iter = 2000 if part_idx == 0 else 5000
-        for i in tqdm.tqdm(range(n_iter)):
-            optimizer.zero_grad()
-
-            # Compute the target point cloud
-            if USE_POINTNET:
-                if CONCAT_POS_DEFORM:
-                    deform_points = net(cur_point_feat, pt=cur_src_pc)
-                else:
-                    deform_points = net(cur_point_feat)
-            else:
-                deform_points = net(cur_src_pc)
-            deformed_src_pc = cur_src_pc + deform_points
-            # deformed_src_pc = net(src_pc)
-
-            # Compute the loss
-            loss, _ = chamfer_distance(
-                deformed_src_pc.unsqueeze(0), cur_tgt_pc.unsqueeze(0)
-            )
-            # L2 regularization term
-            if l2_lambda > 0:
-                l2_reg = torch.tensor(0., requires_grad=True).to(device)
-                for param in net.parameters():
-                    l2_reg += torch.norm(param, 2)
-
-                # Add L2 regularization term to the loss
-                loss += l2_lambda * l2_reg
-
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            if USE_FPS:
-                if CONCAT_POS_DEFORM:
-                    deform_points = net(cur_kp_feat, pt=cur_src_kp)
-                else:
-                    deform_points = net(cur_kp_feat)
-                deformed_src_kp = cur_src_kp + deform_points
-                loss, _ = chamfer_distance(
-                    deformed_src_kp, cur_tgt_kp
-                )
-
-                if l2_lambda > 0:
-                    # L2 regularization term
-                    l2_reg = torch.tensor(0., requires_grad=True).to(device)
-                    for param in net.parameters():
-                        l2_reg += torch.norm(param, 2)
-
-                    # print("l2_reg: ", l2_reg.item())
-                    # print("loss: ", loss.item())
-
-                    # Add L2 regularization term to the loss
-                    loss += l2_lambda * l2_reg
-
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-
-            if i % 100 == 0:
-                print(f"Loss: {loss.item()}")
-                pc_img = plot_pointcloud(
-                    deformed_src_pc,
-                    save_img_dir,
-                    title=f"Part {part_idx} Deformed Point Cloud Iter {i}",
-                )
-                pc_images.append(pc_img)
-                if USE_FPS:
-                    kp_img = plot_pointcloud(
-                        deformed_src_kp,
-                        save_img_dir,
-                        title=f"Part {part_idx} Deformed Keypoints Iter {i}",
-                    )
-                    kp_images.append(kp_img)
-
-        total_result.append(deformed_src_pc)
-        total_kp_result.append(deformed_src_kp)
-
-        torch.save(
-            net.state_dict(), os.path.join(log_dir, f"deform_net_{part_idx}.pth")
-        )
-        imageio.mimsave(
-            os.path.join(log_dir, f"train_deformed_pc_{part_idx}.mp4"), pc_images, fps=10
-        )
-        if USE_FPS:
-            imageio.mimsave(
-                os.path.join(log_dir, f"train_deformed_kp_{part_idx}.mp4"),
-                kp_images,
-                fps=10,
-            )
-    total_result = torch.cat(total_result, dim=0)
-    total_kp_result = torch.cat(total_kp_result, dim=1).squeeze(0)
-    pc_img = plot_pointcloud(
-        total_result,
-        log_dir,
-        title=f"Total Final Deformed Point Cloud",
-    )
-    kp_img = plot_pointcloud(
-        total_kp_result,
-        log_dir,
-        title=f"Total Final Deformed Keypoints",
-    )
-
-""" 
-Deform the point cloud
-"""
-
-if TEST_DEFORM_NET:
-    src_pc_dir = "/NAS/yza629/codes/papr-retarget/point_clouds/butterfly"
-    deform_vectors_path = "/NAS/yza629/codes/papr-retarget/fit_pointcloud_logs/deform_points.pth"
-
-    cur_log_dir = os.path.join(log_dir, 'test_deformed_pc')
-    os.makedirs(cur_log_dir, exist_ok=True)
-
-    # deform_vectors = torch.load(deform_vectors_path)
-
-    start = 0
-    end = 30001
-    interval = 1000
-    src_pcs = []
-    deformed_pcs = []
-    for idx in tqdm.tqdm(range(start, end, interval)):
-        src_pc_path = os.path.join(src_pc_dir, f"points_{idx}.npy")
-        src_pc = np.load(src_pc_path)
-
-        src_pc = torch.tensor(src_pc).float().to(device)
-
-        scale = 10.0
-        src_pc = src_pc / scale
-        # print("src_pc: ", src_pc.shape, src_pc.min(), src_pc.max())
-
-        if idx == start:
-            t0_src_pc = src_pc.clone()
-
-        # src_pc = sfp(src_pc.unsqueeze(0), K=1000)[0].squeeze(0)
-
-        # Deform the point cloud
-        with torch.no_grad():
-            deform_points = net(src_pc)
-            deformed_pc = src_pc + deform_points
-            # deformed_pc = t0_src_pc + deform_points
-            # deformed_pc = net(src_pc)
-
-        if idx == start:
-            t0_deformed_pc = deformed_pc.clone()
-
-        # Plot the point clouds
-        src_pc_plot = plot_pointcloud(src_pc, cur_log_dir, title=f"frame_{idx}_source")
-        deformed_pc_plot = plot_pointcloud(deformed_pc, cur_log_dir, title=f"frame_{idx}_deformed")
-
-        src_pcs.append(src_pc_plot)
-        deformed_pcs.append(deformed_pc_plot)
-
-    imageio.mimsave(os.path.join(cur_log_dir, 'test_source_pc.mp4'), src_pcs, fps=10)
-    imageio.mimsave(os.path.join(cur_log_dir, 'test_deformed_pc.mp4'), deformed_pcs, fps=10)
-
-
-def smooth_point_cloud(point_clouds, window_size):
-    # Create an empty list to store the smoothed point clouds
-    smoothed_point_clouds = []
-
-    # Pad the list of point clouds with copies of the first and last point clouds
-    padded_point_clouds = (
-        ([point_clouds[0]] * (window_size // 2))
-        + point_clouds
-        + ([point_clouds[-1]] * (window_size // 2))
-    )
-
-    # Apply the moving average filter
-    for i in range(window_size // 2, len(padded_point_clouds) - window_size // 2):
-        # Get the window of point clouds for this iteration
-        window = padded_point_clouds[i - window_size // 2 : i + window_size // 2 + 1]
-
-        # Calculate the average point cloud for this window
-        average_point_cloud = np.mean(window, axis=0)
-
-        # Add the average point cloud to the list of smoothed point clouds
-        smoothed_point_clouds.append(average_point_cloud)
-
-    # Set the first and last point clouds to be the same as the original ones
-    smoothed_point_clouds[0] = point_clouds[0]
-    smoothed_point_clouds[-1] = point_clouds[-1]
-
-    return smoothed_point_clouds
-
-
 if REG_DEFORM_NET:
     """
     Regularize the point cloud
@@ -848,17 +569,13 @@ if REG_DEFORM_NET:
     cd_loss_w = 1000.0
     # cd_loss_w = 1.0
     rigid_loss_w = 1.0
-    # rigid_loss_w = 1000.0
-    ldas_loss_w = 0.0
+    # rigid_loss_w = 10.0
+    ldas_loss_w = 1.0
     # cd_weight_decay = 'zeros'
     src_pc_dir = "/NAS/spa176/papr-retarget/point_clouds/butterfly"
 
-    # num_nn = 100
-    num_nn_wing = 5
-    # num_nn_body = 250
-    num_nn_body = 90
-    # num_nn_wing = num_nn_body = 100
-    num_nns = [num_nn_wing, num_nn_body]
+    num_nn = 100
+    # num_nn = 50
     concat_feature = True
     input_case = 0
     no_scale = False
@@ -867,44 +584,33 @@ if REG_DEFORM_NET:
     use_keypoints = True
     # use_keypoints = False
     flip_normal = True
-    # num_keypoints = 64
-    # num_keypoints = 96
-    num_keypoints = 192
+    num_keypoints = 64
+    # num_keypoints = 32
+    # num_keypoints = 128
     # num_keypoints_body = 64
-    # num_keypoints_body = 256
+    # num_keypoints_body = 128
     num_keypoints_body = 96
-    # kp_knn = 5
+    kp_knn = 5
     # kp_knn_body = 5
     # kp_knn_body = 50
     # kp_knn = 20
-    kp_knn = 50
-    motion_frame_skip = 200
-    kp_knn_body = 96
-    # kp_knn_body = 256
+    kp_knn_body = 20
     # num_keypoints = 1024
     # kp_knn = 5
     total_part_num = 2
-
-    regularize_kp_only = True
-    double_side_chamfer = True
-    smooth_inp_seq = False
-    smooth_window_size = 35
-
-    reg_displacement = True
 
     # test_transform_net = True
     test_transform_net = False
 
     transform_L = 0
     loss_type = "L1_fix"
-    # loss_type = "MSE"
     # cur_log_dir = os.path.join(log_dir, f'test_deformed_pc_regularized_cdw{cd_loss_w}_wdecay{cd_weight_decay}')
     if concat_feature:
         if use_keypoints:
             cur_log_dir = os.path.join(
                 log_dir,
-                # f"transform_wing_kp_{num_keypoints}_body_kp_{num_keypoints_body}_kpnn_{kp_knn}_bodykpnn_{kp_knn_body}_frame_skip_{motion_frame_skip}_cdw{cd_loss_w}_rigidw{rigid_loss_w}_ldasw{ldas_loss_w}_nnwing{num_nn_wing}_nnbody{num_nn_body}_concat_{input_case}",
-                f"{loss_type}_wing_kp_{num_keypoints}_body_kp_{num_keypoints_body}_kpnn_{kp_knn}_bodykpnn_{kp_knn_body}_cdw{cd_loss_w}_rigidw{rigid_loss_w}_nnwing{num_nn_wing}_nnbody{num_nn_body}",
+                f"transform_wing_kp_{num_keypoints}_body_kp_{num_keypoints_body}_kpnn_{kp_knn}_bodykpnn_{kp_knn_body}_cdw{cd_loss_w}_rigidw{rigid_loss_w}_ldasw{ldas_loss_w}_nn{num_nn}_concat_{input_case}",
+                # f"test_deformed_pc",
             )
             # cur_log_dir = os.path.join(
             #     log_dir,
@@ -917,17 +623,6 @@ if REG_DEFORM_NET:
                 f"transform_L{transform_L}_cdw{cd_loss_w}_rigidw{rigid_loss_w}_ldasw{ldas_loss_w}_nn{num_nn}_concat_{input_case}",
                 # f"test_deformed_pc",
             )
-        if regularize_kp_only:
-            cur_log_dir += "_kp_only"
-
-        # if double_side_chamfer:
-        #     cur_log_dir += "_double_side_chamfer"
-
-        if smooth_inp_seq:
-            cur_log_dir += "_smooth_inp_seq_size" + str(smooth_window_size)
-
-        if reg_displacement:
-            cur_log_dir += "_regD"
 
     elif no_scale:
         cur_log_dir = os.path.join(
@@ -969,7 +664,7 @@ if REG_DEFORM_NET:
 
     start = 0
     end = 30001
-    interval = motion_frame_skip
+    interval = 1000
 
     src_pcs = [[] for _ in range(total_part_num)]
     deformed_pcs = [[] for _ in range(total_part_num)]
@@ -980,40 +675,24 @@ if REG_DEFORM_NET:
 
     ########## Load the point cloud by parts ##########
     ########## Optionally add key points ##########
-    scale = 10.0
-    raw_pcs = []
     for idx in tqdm.tqdm(range(start, end, interval)):
-        src_pc_path = os.path.join(src_pc_dir, f"points_{idx}.npy")
-        cur_src_pc = np.load(src_pc_path)
-        cur_src_pc = cur_src_pc / scale
-        raw_pcs.append(cur_src_pc)
+        if idx > 0:
+            src_pc_path = os.path.join(src_pc_dir, f"points_{idx}.npy")
+            src_pc = np.load(src_pc_path)
 
-    if smooth_inp_seq:
-        raw_pcs = smooth_point_cloud(raw_pcs, smooth_window_size)
+            # src_pc = torch.tensor(src_pc).float().to(device)
+            src_pc = torch.tensor(src_pc).float()
 
-    for idx in tqdm.tqdm(range(len(raw_pcs))):
-        if idx == 0:
-            src_pc = src_pc.cpu()
+            scale = 10.0
+            src_pc = src_pc / scale
         else:
-            src_pc = torch.tensor(raw_pcs[idx]).float()
-        # for idx in tqdm.tqdm(range(start, end, interval)):
-        # if idx > 0:
-        #     src_pc_path = os.path.join(src_pc_dir, f"points_{idx}.npy")
-        #     src_pc = np.load(src_pc_path)
-
-        #     # src_pc = torch.tensor(src_pc).float().to(device)
-        #     src_pc = torch.tensor(src_pc).float()
-
-        #     scale = 10.0
-        #     src_pc = src_pc / scale
-        # else:
-        #     src_pc = src_pc.cpu()
+            src_pc = src_pc.cpu()
 
         for part_idx in range(total_part_num):
             if part_idx == 0:
                 cur_src_pc = src_pc[but_wing_indices]
             else:
-                if DENSIFY_BODY and idx == 0:
+                if DENSIFY_BODY and idx == start:
                     cur_src_pc = src_pc[but_body_indices_concat]
                 else:
                     # but_body_indices = np.setdiff1d(
@@ -1026,7 +705,7 @@ if REG_DEFORM_NET:
             #     else:
             #         src_pcs[part_idx].append(cur_src_pc)
 
-            if idx == 0:
+            if idx == start:
                 full_src_pc = src_pc.clone()
                 if use_keypoints:
                     src_pcs[part_idx] = cur_src_pc.unsqueeze(0)
@@ -1066,21 +745,10 @@ if REG_DEFORM_NET:
         num_steps = src_pcs[0].shape[0]
     num_pts = [src_pcs[part_idx].shape[1] for part_idx in range(total_part_num)]
     # num_steps, num_pts, _ = src_pcs.shape
-    if regularize_kp_only:
-        for part_idx in range(total_part_num):
-            num_pts[part_idx] = key_points[part_idx].shape[1] 
-    if reg_displacement:
-        dist_to_nn = [
-            torch.empty(num_pts[part_idx], num_nns[part_idx], 3)
-            for part_idx in range(total_part_num)
-        ]
-    else:
-        dist_to_nn = [
-            torch.empty(num_pts[part_idx], num_nns[part_idx]) for part_idx in range(total_part_num)
-        ]
-    nn_indices = [torch.empty(num_pts[part_idx], num_nns[part_idx]) for part_idx in range(total_part_num)]
-    nn_weights = [torch.empty(num_pts[part_idx], num_nns[part_idx]) for part_idx in range(total_part_num)]
-    nn_init_positions = [torch.empty(num_pts[part_idx], num_nns[part_idx], 3) for part_idx in range(total_part_num)]
+    dist_to_nn = [torch.empty(num_pts[part_idx], num_nn) for part_idx in range(total_part_num)]
+    nn_indices = [torch.empty(num_pts[part_idx], num_nn) for part_idx in range(total_part_num)]
+    nn_weights = [torch.empty(num_pts[part_idx], num_nn) for part_idx in range(total_part_num)]
+    nn_init_positions = [torch.empty(num_pts[part_idx], num_nn, 3) for part_idx in range(total_part_num)]
     # dist_to_nn = torch.empty(num_pts, num_nn)
     # nn_indices = torch.empty(num_pts, num_nn)
     # nn_weights = torch.empty(num_pts, num_nn)
@@ -1147,8 +815,7 @@ if REG_DEFORM_NET:
     if USE_POINTNET:
         del pointnet
 
-    sample_skip = num_steps // 6
-    sample_steps = torch.arange(0, num_steps + 1, sample_skip)
+    sample_steps = torch.arange(0, num_steps + 1, 5)
 
     if use_keypoints:
         pred_deformed_pcs = []
@@ -1266,7 +933,7 @@ if REG_DEFORM_NET:
 
     def visualize_time_steps(pc_images, cur_log_dir, num_steps, cur_iter):
         with torch.no_grad():
-            # sample_steps = torch.arange(0, num_steps + 1, 5)
+            sample_steps = torch.arange(0, num_steps + 1, 5)
 
             total_deformed_pc = []
 
@@ -1332,142 +999,20 @@ if REG_DEFORM_NET:
             )
             pc_images.append(pc_img)
 
-    def save_all_deformed_pcs():
-        with torch.no_grad():
-            total_deformed_pc = []
-
-            for part_idx in range(total_part_num):
-                if use_keypoints:
-                    pc_inp = key_points[part_idx]
-                    vis_base_displacement = ori_kp_deforms[part_idx]
-                else:
-                    pc_inp = src_pcs[sample_steps]
-                    vis_base_displacement = init_displacement
-
-                if concat_feature:
-                    if input_case == 0:
-                        scale, quaternion = transform_net(
-                            torch.cat(
-                                [
-                                    pc_inp.to(device),
-                                    pred_normals[part_idx][0:1]
-                                    .expand(num_steps, -1, -1)
-                                    .to(device),
-                                    pred_normals[part_idx].to(device),
-                                ],
-                                dim=-1,
-                            )
-                        )
-                    else:
-                        scale, quaternion = transform_net(
-                            torch.cat(
-                                [
-                                    src_pcs[sample_steps].to(device),
-                                    init_displacement.expand(len(sample_steps), -1, -1),
-                                ],
-                                dim=-1,
-                            )
-                        )
-                else:
-                    scale, quaternion = transform_net(pc_inp.to(device))
-                rotation_matrix = quaternion_to_matrix(quaternion)
-                deformed_src_pcs = apply_transformation(
-                    vis_base_displacement.to(device),
-                    scale,
-                    rotation_matrix,
-                    no_scale=no_scale,
-                ) + pc_inp.to(device)
-                # deformed_src_pcs = vis_base_displacement.to(device) + pc_inp.to(device)
-                if use_keypoints:
-                    deformed_pcs = []
-                    for deformed_kp in deformed_src_pcs:
-                        deformed_pcs.append(
-                            torch.einsum(
-                                "ij,ijk->ik",
-                                deformed_pc_weights[part_idx],
-                                deformed_kp[deformed_nn_inds[part_idx]],
-                            )
-                        )
-                    total_deformed_pc.append(torch.stack(deformed_pcs, dim=0))
-            total_deformed_pc = torch.cat(total_deformed_pc, dim=1) # shape (num_steps, num_pts, 3)
-
-        # save the total deformed point cloud as a pytorch tensor
-        torch.save(total_deformed_pc, os.path.join(cur_log_dir, "total_deformed_pc.pth"))
-        # save the initial deformed point cloud at start state
-        torch.save(
-            torch.cat(deformed_src_pc_start, dim=0),
-            os.path.join(cur_log_dir, "deformed_src_pc_start.pth"),
-        )
-
-    def save_deformed_kps():
-        with torch.no_grad():
-            for part_idx in range(total_part_num):
-                if use_keypoints:
-                    pc_inp = key_points[part_idx]
-                    vis_base_displacement = ori_kp_deforms[part_idx]
-                else:
-                    pc_inp = src_pcs[sample_steps]
-                    vis_base_displacement = init_displacement
-
-                if concat_feature:
-                    if input_case == 0:
-                        scale, quaternion = transform_net(
-                            torch.cat(
-                                [
-                                    pc_inp.to(device),
-                                    pred_normals[part_idx][0:1]
-                                    .expand(num_steps, -1, -1)
-                                    .to(device),
-                                    pred_normals[part_idx].to(device),
-                                ],
-                                dim=-1,
-                            )
-                        )
-                    else:
-                        scale, quaternion = transform_net(
-                            torch.cat(
-                                [
-                                    src_pcs[sample_steps].to(device),
-                                    init_displacement.expand(len(sample_steps), -1, -1),
-                                ],
-                                dim=-1,
-                            )
-                        )
-                else:
-                    scale, quaternion = transform_net(pc_inp.to(device))
-                rotation_matrix = quaternion_to_matrix(quaternion)
-                deformed_src_pcs = apply_transformation(
-                    vis_base_displacement.to(device),
-                    scale,
-                    rotation_matrix,
-                    no_scale=no_scale,
-                ) + pc_inp.to(device)
-
-                # save the total deformed point cloud as a pytorch tensor
-                torch.save(
-                    deformed_src_pcs, os.path.join(cur_log_dir, f"total_deformed_kps_p{part_idx}.pth")
-                )
-
     if test_transform_net:
         transform_net.load_state_dict(
             torch.load(os.path.join(cur_log_dir, "transform_net.pth"))
         )
-        # visualize_time_steps(pc_images, cur_log_dir, num_steps, n_iter + 1)
-        # save_all_deformed_pcs()
-        save_deformed_kps()
-        exit(0)
+        visualize_time_steps(pc_images, cur_log_dir, num_steps, n_iter + 1)
+        print(a)
 
     # ===== old optimizer of the deform net =====
     # optimizer = torch.optim.Adam(reg_net.parameters(), lr=0.0005)
     optimizer = torch.optim.Adam(transform_net.parameters(), lr=0.0005)
 
     if use_keypoints:
-        if regularize_kp_only:
-            base_dist_pcs = [deformed_src_pc_start[part_idx][kp_indices[part_idx][0]] for part_idx in range(total_part_num)]
-            base_displacement = ori_kp_deforms
-        else:
-            base_dist_pcs = pred_deformed_pcs
-            base_displacement = ori_kp_deforms
+        base_dist_pcs = pred_deformed_pcs
+        base_displacement = ori_kp_deforms
     else:
         base_dist_pcs = deformed_src_pc
         base_displacement = init_displacement
@@ -1475,36 +1020,23 @@ if REG_DEFORM_NET:
     for part_idx in range(total_part_num):
         for pt_idx in range(num_pts[part_idx]):
             # find the distance from the point at index i to all others points
-            displacement_to_all_pts = (
-                base_dist_pcs[part_idx][pt_idx : pt_idx + 1, :].expand(
-                    num_pts[part_idx], 3
+            dist_to_all_pts = (
+                (
+                    base_dist_pcs[part_idx][pt_idx : pt_idx + 1, :].expand(
+                        num_pts[part_idx], 3
+                    )
+                    - base_dist_pcs[part_idx]
                 )
-                - base_dist_pcs[part_idx]
+                .pow(2)
+                .sum(dim=1)
             )
-
-            # dist_to_all_pts = (
-            #     (
-            #         base_dist_pcs[part_idx][pt_idx : pt_idx + 1, :].expand(
-            #             num_pts[part_idx], 3
-            #         )
-            #         - base_dist_pcs[part_idx]
-            #     )
-            #     .pow(2)
-            #     .sum(dim=1)
-            # )
             vals, inds = torch.topk(
-                displacement_to_all_pts.pow(2).sum(dim=1), num_nns[part_idx] + 1, largest=False, sorted=True
+                dist_to_all_pts, num_nn + 1, largest=False, sorted=True
             )
-            if reg_displacement:
-                dist_to_nn[part_idx][pt_idx, :, :], nn_indices[part_idx][pt_idx, :] = (
-                    displacement_to_all_pts[inds[1:]],
-                    inds[1:],
-                )
-            else:
-                dist_to_nn[part_idx][pt_idx, :], nn_indices[part_idx][pt_idx, :] = (
-                    vals[1:],
-                    inds[1:],
-                )
+            dist_to_nn[part_idx][pt_idx, :], nn_indices[part_idx][pt_idx, :] = (
+                vals[1:],
+                inds[1:],
+            )
             # gaussian_weight = 0
             # nn_weights[pt_idx, :] = (
             #     (-dist_to_nn[pt_idx, :] * gaussian_weight).exp().detach()
@@ -1537,8 +1069,6 @@ if REG_DEFORM_NET:
             imageio.mimsave(
                 os.path.join(cur_log_dir, "train_deformed_pc.mp4"), pc_images, fps=10
             )
-            save_all_deformed_pcs()
-            save_deformed_kps()
 
         # total_reg_loss = 0
         for j in range(1, num_steps):
@@ -1563,17 +1093,11 @@ if REG_DEFORM_NET:
                 inp_pcs = src_pcs
 
             for part_idx in range(total_part_num):
-                num_nn = num_nns[part_idx]
                 total_reg_loss = 0
-                if regularize_kp_only:
-                    cur_tgt_pc = deformed_src_pc_start[part_idx][
-                        kp_indices[part_idx][0]
-                    ]
+                if part_idx == 0:
+                    cur_tgt_pc = tgt_pc[bird_wing_indices]
                 else:
-                    if part_idx == 0:
-                        cur_tgt_pc = tgt_pc[bird_wing_indices]
-                    else:
-                        cur_tgt_pc = tgt_pc[bird_body_indices]
+                    cur_tgt_pc = tgt_pc[bird_body_indices]
 
                 if concat_feature:
                     if input_case == 0:
@@ -1613,14 +1137,11 @@ if REG_DEFORM_NET:
                 ) + inp_pcs[part_idx][0].to(device)
                 # print(f"Loss: {loss.item()}, Reg Loss: {total_reg_loss.item()}, CD Loss: {total_cd_loss.item()}")
                 if use_keypoints:
-                    if regularize_kp_only:
-                        final_deformed_src_pcs = deformed_src_pcs
-                    else:
-                        final_deformed_src_pcs = torch.einsum(
-                            "ij,ijk->ik",
-                            deformed_pc_weights[part_idx],
-                            deformed_src_pcs[deformed_nn_inds[part_idx]],
-                        )
+                    final_deformed_src_pcs = torch.einsum(
+                        "ij,ijk->ik",
+                        deformed_pc_weights[part_idx],
+                        deformed_src_pcs[deformed_nn_inds[part_idx]],
+                    )
                 else:
                     final_deformed_src_pcs = deformed_src_pcs
                 # ===== vanilla loss without keypoint =====
@@ -1628,12 +1149,6 @@ if REG_DEFORM_NET:
                 # deformed_src_pcs = apply_transformation(
                 #     init_displacement[0], scale, rotation_matrix, no_scale=no_scale
                 # ) + inp_pcs[0].to(device)
-
-                # if regularize_kp_only and not double_side_chamfer:
-                #     total_cd_loss = chamfer_distance(
-                #         final_deformed_src_pcs.unsqueeze(0), cur_tgt_pc.unsqueeze(0), single_directional=True
-                #     )[0]
-                # else:
                 total_cd_loss = chamfer_distance(
                     final_deformed_src_pcs.unsqueeze(0), cur_tgt_pc.unsqueeze(0)
                 )[0]
@@ -1687,14 +1202,11 @@ if REG_DEFORM_NET:
                     displacement.to(device), scale, rotation_matrix, no_scale=no_scale
                 ) + inp_pcs[part_idx][j].to(device)
                 if use_keypoints:
-                    if regularize_kp_only:
-                        cur_deformed_src_pcs = deformed_src_pcs
-                    else:
-                        cur_deformed_src_pcs = torch.einsum(
-                            "ij,ijk->ik",
-                            deformed_pc_weights[part_idx],
-                            deformed_src_pcs[deformed_nn_inds[part_idx]],
-                        )
+                    cur_deformed_src_pcs = torch.einsum(
+                        "ij,ijk->ik",
+                        deformed_pc_weights[part_idx],
+                        deformed_src_pcs[deformed_nn_inds[part_idx]],
+                    )
                 else:
                     cur_deformed_src_pcs = deformed_src_pcs
 
@@ -1702,40 +1214,25 @@ if REG_DEFORM_NET:
                 # deformed_src_pcs = apply_transformation(
                 #     init_displacement[0], scale, rotation_matrix, no_scale=no_scale
                 # ) + src_pcs[j].to(device)
-
-                total_displacement_after_update = (
-                    cur_deformed_src_pcs.view(num_pts[part_idx], 1, 3).expand(
-                        num_pts[part_idx], num_nn, 3
+                total_dist_to_nn_after_update = (
+                    (
+                        cur_deformed_src_pcs.view(num_pts[part_idx], 1, 3).expand(
+                            num_pts[part_idx], num_nn, 3
+                        )
+                        - cur_deformed_src_pcs.view(num_pts[part_idx], 1, 3)
+                        .expand(num_pts[part_idx], num_pts[part_idx], 3)
+                        .gather(
+                            0,
+                            nn_indices[part_idx][:, :num_nn]
+                            .to(device)
+                            .unsqueeze(-1)
+                            .expand(num_pts[part_idx], num_nn, 3),
+                        )
+                        # ).pow(2).sum(dim=2) * nn_weights[:, :num_nn].to(device)
                     )
-                    - cur_deformed_src_pcs.view(num_pts[part_idx], 1, 3)
-                    .expand(num_pts[part_idx], num_pts[part_idx], 3)
-                    .gather(
-                        0,
-                        nn_indices[part_idx][:, :num_nn]
-                        .to(device)
-                        .unsqueeze(-1)
-                        .expand(num_pts[part_idx], num_nn, 3),
-                    )
+                    .pow(2)
+                    .sum(dim=2)
                 )
-                # total_dist_to_nn_after_update = (
-                #     (
-                #         cur_deformed_src_pcs.view(num_pts[part_idx], 1, 3).expand(
-                #             num_pts[part_idx], num_nn, 3
-                #         )
-                #         - cur_deformed_src_pcs.view(num_pts[part_idx], 1, 3)
-                #         .expand(num_pts[part_idx], num_pts[part_idx], 3)
-                #         .gather(
-                #             0,
-                #             nn_indices[part_idx][:, :num_nn]
-                #             .to(device)
-                #             .unsqueeze(-1)
-                #             .expand(num_pts[part_idx], num_nn, 3),
-                #         )
-                #         # ).pow(2).sum(dim=2) * nn_weights[:, :num_nn].to(device)
-                #     )
-                #     .pow(2)
-                #     .sum(dim=2)
-                # )
                 # total_dist_to_nn_after_update = (
                 #     deformed_src_pcs[j].view(num_pts, 1, 3).expand(num_pts, num_nn, 3)
                 #     - deformed_src_pcs[j]
@@ -1756,32 +1253,15 @@ if REG_DEFORM_NET:
                         total_dist_to_nn_after_update.sum(dim=1) - dist_to_nn.to(device)
                     ).abs().sum() / (num_pts[part_idx] * num_nn)
                 elif loss_type == "L1_fix":
-                    if reg_displacement:
-                        reg_loss = (
-                            (
-                                total_displacement_after_update
-                                - dist_to_nn[part_idx][:, :num_nn, :].to(device)
-                            )
-                        ).abs().sum() / (num_pts[part_idx] * num_nn)
-                    else:
-                        reg_loss = (
-                            total_displacement_after_update.pow(2).sum(dim=2)
-                            - dist_to_nn[part_idx][:, :num_nn].to(device)
-                        ).abs().sum() / (num_pts[part_idx] * num_nn)
+                    reg_loss = (
+                        total_dist_to_nn_after_update
+                        - dist_to_nn[part_idx][:, :num_nn].to(device)
+                    ).abs().sum() / (num_pts[part_idx] * num_nn)
                 elif loss_type == "MSE":
-                    if reg_displacement:
-                        reg_loss = (
-                            torch.nn.functional.mse_loss(
-                                total_displacement_after_update,
-                                dist_to_nn[part_idx][:, :num_nn, :].to(device),
-                            )
-                            / num_nn
-                        )
-                    else:
-                        reg_loss = torch.nn.functional.mse_loss(
-                            total_displacement_after_update.pow(2).sum(dim=2),
-                            dist_to_nn[part_idx][:, :num_nn].to(device),
-                        )
+                    reg_loss = torch.nn.functional.mse_loss(
+                        total_dist_to_nn_after_update,
+                        dist_to_nn[part_idx][:, :num_nn].to(device),
+                    )
                 elif loss_type == "robust":
                     x = (
                         total_dist_to_nn_after_update
@@ -1838,37 +1318,36 @@ if REG_DEFORM_NET:
                 #     .sum(dim=1)
                 # ).mean()
 
-                # ====================== try this version ======================
-                # avg_displacement = (
-                #     cur_deformed_src_pcs.view(num_pts[part_idx], 1, 3)
-                #     .expand(num_pts[part_idx], num_nn, 3)
-                #     .gather(
-                #         0,
-                #         nn_indices[part_idx][:, :num_nn]
-                #         .to(device)
-                #         .unsqueeze(-1)
-                #         .expand(num_pts[part_idx], num_nn, 3),
-                #     )
-                #     - nn_init_positions[part_idx]
-                #     .view(num_pts[part_idx], 1, 3)
-                #     .expand(num_pts[part_idx], num_pts[part_idx], 3)
-                #     .gather(
-                #         0,
-                #         nn_indices[part_idx][:, :num_nn]
-                #         .to(device)
-                #         .unsqueeze(-1)
-                #         .expand(num_pts[part_idx], num_nn, 3),
-                #     )
-                # ).mean(dim=1)
-                # avg_displacement_loss = (
-                #     (
-                #         cur_deformed_src_pcs
-                #         - (avg_displacement + nn_init_positions[part_idx])
-                #     )
-                #     .pow(2)
-                #     .sum(dim=1)
-                # ).mean()
-                # total_reg_loss += avg_displacement_loss * ldas_loss_w
+                avg_displacement = (
+                    cur_deformed_src_pcs.view(num_pts[part_idx], 1, 3)
+                    .expand(num_pts[part_idx], num_nn, 3)
+                    .gather(
+                        0,
+                        nn_indices[part_idx][:, :num_nn]
+                        .to(device)
+                        .unsqueeze(-1)
+                        .expand(num_pts[part_idx], num_nn, 3),
+                    )
+                    - nn_init_positions[part_idx]
+                    .view(num_pts[part_idx], 1, 3)
+                    .expand(num_pts[part_idx], num_pts[part_idx], 3)
+                    .gather(
+                        0,
+                        nn_indices[part_idx][:, :num_nn]
+                        .to(device)
+                        .unsqueeze(-1)
+                        .expand(num_pts[part_idx], num_nn, 3),
+                    )
+                ).mean(dim=1)
+                avg_displacement_loss = (
+                    (
+                        cur_deformed_src_pcs
+                        - (avg_displacement + nn_init_positions[part_idx])
+                    )
+                    .pow(2)
+                    .sum(dim=1)
+                ).mean()
+                total_reg_loss += avg_displacement_loss * ldas_loss_w
 
                 # ==== add the displacement regularizer ====
                 # Design 1: preserve the distance that each point in src travels
@@ -1897,5 +1376,3 @@ if REG_DEFORM_NET:
         transform_net.state_dict(), os.path.join(cur_log_dir, "transform_net.pth")
     )
     imageio.mimsave(os.path.join(cur_log_dir, 'train_deformed_pc.mp4'), pc_images, fps=10)
-    # save the deformed pcs
-    save_all_deformed_pcs()

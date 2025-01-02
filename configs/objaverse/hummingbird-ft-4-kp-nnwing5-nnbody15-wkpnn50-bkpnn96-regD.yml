@@ -1,6 +1,6 @@
-index: "hummingbird-ft-1"
+index: "hummingbird-ft-4-kp-nnwing5-nnbody15-wkpnn50-bkpnn96-regD"
 train: true
-load_path: "hummingbird-ft-1"
+load_path: "hummingbird-ft-4-kp-nnwing5-nnbody15-wkpnn50-bkpnn96-regD"
 save_dir: "./experiments"
 seed: 1
 eps: 1.0e-6
@@ -335,7 +335,7 @@ eval:
     num_workers: 0
     num_slices: -1
   step: 5000
-  img_idx: 44
+  img_idx: 47
   pc_file_path: "total_deformed_pc_new.pth"
   skip_num: 5
   max_height: 100
