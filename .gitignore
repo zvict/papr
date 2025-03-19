@@ -9,3 +9,7 @@ experiments/
 *.mp4
 *.tar.gz
 !vgg.pth
+deform_pointcloud_logs/
+fit_pointcloud_logs/
+*.npy
+*.txt

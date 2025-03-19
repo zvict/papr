@@ -32,7 +32,7 @@ from pointnet2_utils import (
 )
 from pointnet_utils import STN3d, STNkd, feature_transform_reguliarzer
 from sklearn.neighbors import NearestNeighbors
-from scipy.spatial import KDTree
+from scipy.spatial import KDTree, cKDTree
 from scipy.optimize import linear_sum_assignment
 import plotly.graph_objects as go
 import open3d as o3d
@@ -227,17 +227,19 @@ class DeformNet(nn.Module):
 
 
 class AffineTransformationNet(nn.Module):
-    def __init__(self, input_dim, L=0):
+    def __init__(self, input_dim, L=0, non_pe_dim=0):
         super(AffineTransformationNet, self).__init__()
         self.pose_enc = PoseEnc()
         self.L = L
-        in_dim = input_dim + input_dim * 2 * L
+        in_dim = input_dim + input_dim * 2 * L + non_pe_dim
         self.fc1 = nn.Linear(in_dim, 128)
         self.fc2 = nn.Linear(128, 64)
         self.fc3 = nn.Linear(64, 5)  # 1 for scale, 4 for quaternion
 
-    def forward(self, x):
+    def forward(self, x, non_pe=None):
         x = self.pose_enc(x, self.L)
+        if non_pe is not None:
+            x = torch.cat([x, non_pe], dim=-1)
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         x = self.fc3(x)
@@ -407,7 +409,8 @@ def compute_rotation_matrices_for_batch(point_clouds, num_nn, flip_normal=False)
     # Calculate the surface normals for each time step
     normals = torch.zeros((T, N, 3), device=point_clouds.device)
     for t in range(T):
-        normals[t] = estimate_surface_normals(point_clouds[t], num_nn)
+        # normals[t] = estimate_surface_normals(point_clouds[t], num_nn)
+        normals[t] = estimate_normals(point_clouds[t], num_nn)
 
     # Compute the rotation matrices
     rotation_matrices = torch.zeros((T, N, 3, 3), device=point_clouds.device)
@@ -456,16 +459,27 @@ def parametertize_pc(points, keypoints, num_knn, step=50000):
     return pred_points, weights.detach(), nn_inds
 
 
-def estimate_normals(points, num_nn=30):
-    # Convert points to Open3D point cloud
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(points)
+def estimate_normals(points, num_nn=30, flip_normal=False):
 
-    # Estimate normals
-    pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=num_nn))
+    # reference_point=np.array([0, 0, 0])
+    # Convert points to PyTorch tensor
+    points_tensor = points.unsqueeze(0)  # Shape: (1, N, 3)
 
-    # Get normals as numpy array
-    normals = np.asarray(pcd.normals)
+    # Estimate normals using PyTorch3D
+    normals_tensor = estimate_pointcloud_normals(
+        points_tensor, neighborhood_size=num_nn, disambiguate_directions=True
+    )
+
+    # Convert normals to numpy array
+    normals = normals_tensor.squeeze(0)
+
+    if flip_normal:
+        reference_point = torch.mean(points, axis=0)
+        # Ensure normals are facing away from the reference point
+        vectors_to_reference = points - reference_point
+        dot_products = np.einsum("ij,ij->i", vectors_to_reference, normals)
+        normals[dot_products < 0] *= -1
+
     return normals
 
 
@@ -501,18 +515,23 @@ TRAIN_DEFORM_NET = True
 USE_LINEAR_SUM = True
 # TRAIN_DEFORM_NET = False
 TEST_DEFORM_NET = False
-# REG_DEFORM_NET = True
-REG_DEFORM_NET = False
+REG_DEFORM_NET = True
+# REG_DEFORM_NET = False
 # TEST_REG_DEFORM_NET = True
 USE_POINTNET = True
 # DENSIFY_BODY = True
 DENSIFY_BODY = False
 CONCAT_POS_DEFORM = True
+# USE_COS = True
+USE_COS = False
 
 
 # fps_k = 1000
 num_keypoints = 192
-num_keypoints_body = 96
+num_keypoints_body = 256
+all_num_keypoints = [num_keypoints, num_keypoints_body]
+
+# num_keypoints_body = 192
 scale = 10.0
 num_layers = 3
 # num_layers = 4
@@ -522,26 +541,28 @@ L = 8
 # L = 10
 # L = 0
 log_dir = "fit_pointcloud_logs"
-if USE_POINTNET:
-    # if DENSIFY_BODY:
-    #     exp_dir = f"multi_mlp_icp_shift_pe{L}_pointnet_densify"
-    # elif CONCAT_POS_DEFORM:
-    #     exp_dir = f"multi_mlp_icp_shift_pe{L}_pointnet_concat"
-    # else:
-    exp_dir = f'multi_mlp_icp_shift_pe{L}_pointnet'
-    if DENSIFY_BODY:
-        exp_dir += "_densify"
-    if CONCAT_POS_DEFORM:
-        exp_dir += "_concat"
-    if USE_FPS:
-        exp_dir += "_fps"
-    if num_layers != 3:
-        exp_dir += f"_layers{num_layers}"
-    if DEFORM_KP_ONLY:
-        exp_dir += "_kp"
-else:
-    exp_dir = f"multi_mlp_icp_shift_pe{L}"
-# exp_dir = f'learn_mlp_icp_shift_pe{L}_pointnet'
+# if USE_POINTNET:
+#     # if DENSIFY_BODY:
+#     #     exp_dir = f"multi_mlp_icp_shift_pe{L}_pointnet_densify"
+#     # elif CONCAT_POS_DEFORM:
+#     #     exp_dir = f"multi_mlp_icp_shift_pe{L}_pointnet_concat"
+#     # else:
+#     exp_dir = f'multi_ot_icp_shift_pe{L}_pointnet'
+#     if DENSIFY_BODY:
+#         exp_dir += "_densify"
+#     if CONCAT_POS_DEFORM:
+#         exp_dir += "_concat"
+#     if USE_FPS:
+#         exp_dir += "_fps"
+#     if num_layers != 3:
+#         exp_dir += f"_layers{num_layers}"
+#     if DEFORM_KP_ONLY:
+#         exp_dir += "_kp"
+# else:
+#     exp_dir = f"multi_mlp_icp_shift_pe{L}"
+exp_dir = f'ot_wing{num_keypoints}_body{num_keypoints_body}'
+if USE_COS:
+    exp_dir += "_cos"
 log_dir = os.path.join(log_dir, exp_dir)
 if not os.path.exists(log_dir):
     os.makedirs(log_dir, exist_ok=True)
@@ -608,10 +629,11 @@ if DENSIFY_BODY:
 bird_wing_indices = np.load("hummingbird_wing_indices.npy")
 bird_body_indices = np.setdiff1d(np.arange(len(tgt_pc)), bird_wing_indices)
 
-# net = DeformNet(3, 3, hidden_dim=hidden_dim, num_layers=num_layers, L=L).to(device)
+init_kps = []
+kp_indices = []
+tgt_kps = []
+boundary_indices = []
 
-
-# deform_points = torch.full(src_pc.shape, 0.0, device=device, requires_grad=True)
 
 if TRAIN_DEFORM_NET:
     total_result = []
@@ -637,20 +659,8 @@ if TRAIN_DEFORM_NET:
             ).transpose(2, 1)[0]
 
     for part_idx in range(2):
-    # for part_idx in range(1, 2):
+        # for part_idx in range(1, 2):
         # for part_idx in range(1):
-
-        if USE_POINTNET:
-            if CONCAT_POS_DEFORM:
-                net = DeformNet(2048, 3, hidden_dim=hidden_dim, num_layers=num_layers, L=L, pt_dim=3).to(
-                    device
-                )
-            else:
-                net = DeformNet(2048, 3, hidden_dim=hidden_dim, num_layers=num_layers, L=L).to(
-                    device
-                )
-        else:
-            net = DeformNet(3, 3, hidden_dim=hidden_dim, num_layers=num_layers, L=L).to(device)
 
         if part_idx == 0:
             cur_src_pc = src_pc[but_wing_indices]
@@ -698,21 +708,32 @@ if TRAIN_DEFORM_NET:
         # PLOT_MATCHING = True
         PLOT_NORMAL = False
 
-        if USE_LINEAR_SUM:
-            cur_src_kp = cur_src_kp.squeeze(0).cpu().numpy()  # Shape: (N, 3)
-            cur_tgt_kp = cur_tgt_kp.squeeze(0).cpu().numpy()
+        PLOT_BOUNDARY = False
 
-            # Estimate surface normals for source and target key points
-            cur_src_normals = estimate_normals_pytorch3d(cur_src_kp)
-            cur_tgt_normals = estimate_normals_pytorch3d(cur_tgt_kp)
+        cur_src_kp = cur_src_kp.squeeze(0).cpu().numpy()  # Shape: (N, 3)
+        cur_tgt_kp = cur_tgt_kp.squeeze(0).cpu().numpy()
 
-            # Compute the Euclidean distance matrix
-            euclidean_cost_matrix = np.linalg.norm(
-                cur_src_kp[:, np.newaxis, :] - cur_tgt_kp[np.newaxis, :, :],
-                axis=2,
-            )
+        # Estimate surface normals for source and target key points
+        cur_src_normals = estimate_normals_pytorch3d(cur_src_kp)
+        cur_tgt_normals = estimate_normals_pytorch3d(cur_tgt_kp)
 
-            # Compute the feature distance matrix (e.g., Euclidean distance between normals)
+        # Compute the Euclidean distance matrix
+        euclidean_cost_matrix = np.linalg.norm(
+            cur_src_kp[:, np.newaxis, :] - cur_tgt_kp[np.newaxis, :, :],
+            axis=2,
+        )
+
+        # Compute the feature distance matrix (e.g., Euclidean distance between normals)
+        if USE_COS:
+            src_norms = np.linalg.norm(cur_src_normals, axis=1)
+            tgt_norms = np.linalg.norm(cur_tgt_normals, axis=1)
+            dot_products = np.einsum('ik,jk->ij', cur_src_normals, cur_tgt_normals)
+            norms_product = np.outer(src_norms, tgt_norms)
+            cos_similarity = dot_products / (norms_product + 1e-8)
+            feature_cost_matrix = 1.0 - cos_similarity
+
+            cost_matrix = euclidean_cost_matrix * (1 + feature_cost_matrix)
+        else:
             feature_cost_matrix = np.linalg.norm(
                 cur_src_normals[:, np.newaxis, :] - cur_tgt_normals[np.newaxis, :, :],
                 axis=2,
@@ -723,263 +744,210 @@ if TRAIN_DEFORM_NET:
             # alpha = 0.5  # Weighting factor for combining the distances
             cost_matrix = alpha * euclidean_cost_matrix + (1 - alpha) * feature_cost_matrix
 
+        # cost_matrix = np.linalg.norm(
+        #     cur_src_kp[:, np.newaxis, :] - cur_tgt_kp[np.newaxis, :, :],
+        #     axis=2,
+        # )
 
-            # cost_matrix = np.linalg.norm(
-            #     cur_src_kp[:, np.newaxis, :] - cur_tgt_kp[np.newaxis, :, :],
-            #     axis=2,
-            # )
+        # Solve the optimal transport problem using the Hungarian algorithm
+        row_ind, col_ind = linear_sum_assignment(cost_matrix)
 
-            # Solve the optimal transport problem using the Hungarian algorithm
-            row_ind, col_ind = linear_sum_assignment(cost_matrix)
+        # The row_ind and col_ind arrays give the optimal 1-to-1 mapping
+        # cur_src_kp[row_ind[i]] is mapped to cur_tgt_kp[col_ind[i]]
+        mapping = list(zip(row_ind, col_ind))
 
-            # The row_ind and col_ind arrays give the optimal 1-to-1 mapping
-            # cur_src_kp[row_ind[i]] is mapped to cur_tgt_kp[col_ind[i]]
-            mapping = list(zip(row_ind, col_ind))
+        new_tgt_kp = np.zeros_like(cur_src_kp)
+        for src_idx, tgt_idx in mapping:
+            new_tgt_kp[src_idx] = cur_tgt_kp[tgt_idx]
 
-            if PLOT_MATCHING:
+        init_kps.append(torch.from_numpy(cur_src_kp).float())
+        kp_indices.append(src_kp_idx)
+        tgt_kps.append(torch.from_numpy(new_tgt_kp).float())
 
-                # Create a Plotly scatter plot
-                fig = go.Figure()
+        # save the key point to disk
+        np.save(os.path.join(log_dir, f"part{part_idx}_src_kp.npy"), cur_src_kp)
+        np.save(os.path.join(log_dir, f"part{part_idx}_tgt_kp.npy"), new_tgt_kp)
+        # save src_kp_idx
+        # np.save(os.path.join(log_dir, f"part{part_idx}_src_kp_idx.npy"), src_kp_idx)
+        torch.save(src_kp_idx, os.path.join(log_dir, f"part{part_idx}_src_kp_idx.pth"))
 
-                # Add source key points
+        if PLOT_MATCHING:
+
+            # Create a Plotly scatter plot
+            fig = go.Figure()
+
+            # Add source key points
+            fig.add_trace(go.Scatter3d(
+                x=cur_src_kp[:, 0],
+                y=cur_src_kp[:, 1],
+                z=cur_src_kp[:, 2],
+                mode='markers',
+                marker=dict(size=5, color='blue'),
+                name='Source Key Points'
+            ))
+
+            # Add target key points
+            fig.add_trace(go.Scatter3d(
+                x=cur_tgt_kp[:, 0],
+                y=cur_tgt_kp[:, 1],
+                z=cur_tgt_kp[:, 2],
+                mode='markers',
+                marker=dict(size=5, color='red'),
+                name='Target Key Points'
+            ))
+
+            # Add vectors showing the mapping
+            for i, j in mapping:
                 fig.add_trace(go.Scatter3d(
-                    x=cur_src_kp[:, 0],
-                    y=cur_src_kp[:, 1],
-                    z=cur_src_kp[:, 2],
-                    mode='markers',
-                    marker=dict(size=5, color='blue'),
-                    name='Source Key Points'
+                    x=[cur_src_kp[i, 0], cur_tgt_kp[j, 0]],
+                    y=[cur_src_kp[i, 1], cur_tgt_kp[j, 1]],
+                    z=[cur_src_kp[i, 2], cur_tgt_kp[j, 2]],
+                    mode='lines',
+                    line=dict(color='green', width=2),
+                    name=f'Mapping {i}->{j}'
                 ))
 
-                # Add target key points
-                fig.add_trace(go.Scatter3d(
-                    x=cur_tgt_kp[:, 0],
-                    y=cur_tgt_kp[:, 1],
-                    z=cur_tgt_kp[:, 2],
-                    mode='markers',
-                    marker=dict(size=5, color='red'),
-                    name='Target Key Points'
-                ))
-
-                # Add vectors showing the mapping
-                for i, j in mapping:
+            if PLOT_NORMAL:
+                # Add surface normals for source key points
+                normal_length = 0.1  # Adjust the length of the normals as needed
+                for i in range(cur_src_kp.shape[0]):
                     fig.add_trace(go.Scatter3d(
-                        x=[cur_src_kp[i, 0], cur_tgt_kp[j, 0]],
-                        y=[cur_src_kp[i, 1], cur_tgt_kp[j, 1]],
-                        z=[cur_src_kp[i, 2], cur_tgt_kp[j, 2]],
+                        x=[cur_src_kp[i, 0], cur_src_kp[i, 0] + normal_length * cur_src_normals[i, 0]],
+                        y=[cur_src_kp[i, 1], cur_src_kp[i, 1] + normal_length * cur_src_normals[i, 1]],
+                        z=[cur_src_kp[i, 2], cur_src_kp[i, 2] + normal_length * cur_src_normals[i, 2]],
                         mode='lines',
-                        line=dict(color='green', width=2),
-                        name=f'Mapping {i}->{j}'
+                        line=dict(color='blue', width=2),
+                        name='Source Normals'
                     ))
 
-                if PLOT_NORMAL:
-                    # Add surface normals for source key points
-                    normal_length = 0.1  # Adjust the length of the normals as needed
-                    for i in range(cur_src_kp.shape[0]):
-                        fig.add_trace(go.Scatter3d(
-                            x=[cur_src_kp[i, 0], cur_src_kp[i, 0] + normal_length * cur_src_normals[i, 0]],
-                            y=[cur_src_kp[i, 1], cur_src_kp[i, 1] + normal_length * cur_src_normals[i, 1]],
-                            z=[cur_src_kp[i, 2], cur_src_kp[i, 2] + normal_length * cur_src_normals[i, 2]],
-                            mode='lines',
-                            line=dict(color='blue', width=2),
-                            name='Source Normals'
-                        ))
+                # Add surface normals for target key points
+                for i in range(cur_tgt_kp.shape[0]):
+                    fig.add_trace(go.Scatter3d(
+                        x=[cur_tgt_kp[i, 0], cur_tgt_kp[i, 0] + normal_length * cur_tgt_normals[i, 0]],
+                        y=[cur_tgt_kp[i, 1], cur_tgt_kp[i, 1] + normal_length * cur_tgt_normals[i, 1]],
+                        z=[cur_tgt_kp[i, 2], cur_tgt_kp[i, 2] + normal_length * cur_tgt_normals[i, 2]],
+                        mode='lines',
+                        line=dict(color='red', width=2),
+                        name='Target Normals'
+                    ))
 
-                    # Add surface normals for target key points
-                    for i in range(cur_tgt_kp.shape[0]):
-                        fig.add_trace(go.Scatter3d(
-                            x=[cur_tgt_kp[i, 0], cur_tgt_kp[i, 0] + normal_length * cur_tgt_normals[i, 0]],
-                            y=[cur_tgt_kp[i, 1], cur_tgt_kp[i, 1] + normal_length * cur_tgt_normals[i, 1]],
-                            z=[cur_tgt_kp[i, 2], cur_tgt_kp[i, 2] + normal_length * cur_tgt_normals[i, 2]],
-                            mode='lines',
-                            line=dict(color='red', width=2),
-                            name='Target Normals'
-                        ))
-
-                # Set plot layout
-                fig.update_layout(
-                    scene=dict(
-                        xaxis_title='X',
-                        yaxis_title='Y',
-                        zaxis_title='Z'
-                    ),
-                    title='Key Point Mapping'
-                )
-
-                # Show the plot
-                fig.show()
-            # exit(0)
-
-        else:
-            # optimizer = torch.optim.Adam([deform_points], lr=0.001)
-            # lrt = 0.0005 if part_idx == 0 else 0.0001
-            lrt = 0.0001
-            # l2_lambda = 0.000001  # Regularization strength
-            l2_lambda = 0.0  # Regularization strength
-            optimizer = torch.optim.Adam(net.parameters(), lr=lrt)
-            pc_images = []
-            kp_images = []
-            n_iter = 2000 if part_idx == 0 else 5000
-            for i in tqdm.tqdm(range(n_iter)):
-                optimizer.zero_grad()
-
-                if not DEFORM_KP_ONLY:
-                    # Compute the target point cloud
-                    if USE_POINTNET:
-                        if CONCAT_POS_DEFORM:
-                            deform_points = net(cur_point_feat, pt=cur_src_pc)
-                        else:
-                            deform_points = net(cur_point_feat)
-                    else:
-                        deform_points = net(cur_src_pc)
-                    deformed_src_pc = cur_src_pc + deform_points
-                    # deformed_src_pc = net(src_pc)
-
-                    # Compute the loss
-                    loss, _ = chamfer_distance(
-                        deformed_src_pc.unsqueeze(0), cur_tgt_pc.unsqueeze(0)
-                    )
-                    # L2 regularization term
-                    if l2_lambda > 0:
-                        l2_reg = torch.tensor(0., requires_grad=True).to(device)
-                        for param in net.parameters():
-                            l2_reg += torch.norm(param, 2)
-
-                        # Add L2 regularization term to the loss
-                        loss += l2_lambda * l2_reg
-
-                    optimizer.zero_grad()
-                    loss.backward()
-                    optimizer.step()
-
-                if USE_FPS:
-                    if CONCAT_POS_DEFORM:
-                        deform_points = net(cur_kp_feat, pt=cur_src_kp)
-                    else:
-                        deform_points = net(cur_kp_feat)
-                    deformed_src_kp = cur_src_kp + deform_points
-                    loss, _ = chamfer_distance(
-                        deformed_src_kp, cur_tgt_kp
-                    )
-
-                    if l2_lambda > 0:
-                        # L2 regularization term
-                        l2_reg = torch.tensor(0., requires_grad=True).to(device)
-                        for param in net.parameters():
-                            l2_reg += torch.norm(param, 2)
-
-                        # print("l2_reg: ", l2_reg.item())
-                        # print("loss: ", loss.item())
-
-                        # Add L2 regularization term to the loss
-                        loss += l2_lambda * l2_reg
-
-                    optimizer.zero_grad()
-                    loss.backward()
-                    optimizer.step()
-
-                if i % 100 == 0:
-                    print(f"Loss: {loss.item()}")
-                    if not DEFORM_KP_ONLY:
-                        pc_img = plot_pointcloud(
-                            deformed_src_pc,
-                            save_img_dir,
-                            title=f"Part {part_idx} Deformed Point Cloud Iter {i}",
-                        )
-                        pc_images.append(pc_img)
-                    if USE_FPS:
-                        kp_img = plot_pointcloud(
-                            deformed_src_kp,
-                            save_img_dir,
-                            title=f"Part {part_idx} Deformed Keypoints Iter {i}",
-                        )
-                        kp_images.append(kp_img)
-
-            if not DEFORM_KP_ONLY:
-                total_result.append(deformed_src_pc)
-            total_kp_result.append(deformed_src_kp)
-
-            torch.save(
-                net.state_dict(), os.path.join(log_dir, f"deform_net_{part_idx}.pth")
-            )
-            if not DEFORM_KP_ONLY:
-                imageio.mimsave(
-                    os.path.join(log_dir, f"train_deformed_pc_{part_idx}.mp4"), pc_images, fps=10
-                )
-            if USE_FPS:
-                imageio.mimsave(
-                    os.path.join(log_dir, f"train_deformed_kp_{part_idx}.mp4"),
-                    kp_images,
-                    fps=10,
-                )
-    if not USE_LINEAR_SUM:
-        if not DEFORM_KP_ONLY:
-            total_result = torch.cat(total_result, dim=0)
-            pc_img = plot_pointcloud(
-                total_result,
-                log_dir,
-                title=f"Total Final Deformed Point Cloud",
-            )
-        if USE_FPS:
-            total_kp_result = torch.cat(total_kp_result, dim=1).squeeze(0)
-            kp_img = plot_pointcloud(
-                total_kp_result,
-                log_dir,
-                title=f"Total Final Deformed Keypoints",
+            # Set plot layout
+            fig.update_layout(
+                scene=dict(
+                    xaxis_title='X',
+                    yaxis_title='Y',
+                    zaxis_title='Z'
+                ),
+                title='Key Point Mapping'
             )
 
-""" 
-Deform the point cloud
-"""
+            # Show the plot
+            fig.show()
+        # exit(0)
 
-if TEST_DEFORM_NET:
-    src_pc_dir = "/NAS/yza629/codes/papr-retarget/point_clouds/butterfly"
-    deform_vectors_path = "/NAS/yza629/codes/papr-retarget/fit_pointcloud_logs/deform_points.pth"
+    # find the boundary points
+    def find_boundary_points(part1, part2, threshold=0.1):
+        # Convert tensors to numpy arrays for distance computation
+        part1_np = part1.cpu().numpy()
+        part2_np = part2.cpu().numpy()
 
-    cur_log_dir = os.path.join(log_dir, 'test_deformed_pc')
-    os.makedirs(cur_log_dir, exist_ok=True)
+        # Create KD-Trees for efficient nearest neighbor search
+        tree1 = cKDTree(part1_np)
+        tree2 = cKDTree(part2_np)
 
-    # deform_vectors = torch.load(deform_vectors_path)
+        # Find points in part1 that are close to any point in part2
+        dists1, indices1 = tree1.query(part2_np, distance_upper_bound=threshold)
+        boundary_points1 = part1_np[indices1[dists1 < threshold]]
 
-    start = 0
-    end = 30001
-    interval = 1000
-    src_pcs = []
-    deformed_pcs = []
-    for idx in tqdm.tqdm(range(start, end, interval)):
-        src_pc_path = os.path.join(src_pc_dir, f"points_{idx}.npy")
-        src_pc = np.load(src_pc_path)
+        # Find points in part2 that are close to any point in part1
+        dists2, indices2 = tree2.query(part1_np, distance_upper_bound=threshold)
+        boundary_points2 = part2_np[indices2[dists2 < threshold]]
 
-        src_pc = torch.tensor(src_pc).float().to(device)
+        # Convert boundary points back to tensors
+        boundary_points1_indices = indices1[dists1 < threshold]
+        boundary_points2_indices = indices2[dists2 < threshold]
 
-        scale = 10.0
-        src_pc = src_pc / scale
-        # print("src_pc: ", src_pc.shape, src_pc.min(), src_pc.max())
+        return boundary_points1_indices, boundary_points2_indices
 
-        if idx == start:
-            t0_src_pc = src_pc.clone()
+    boundary_threshold = 0.75
+    # Find the boundary points between the two parts
+    boundary_points1_indices, boundary_points2_indices = find_boundary_points(
+        tgt_kps[0], tgt_kps[1], threshold=boundary_threshold
+    )
+    boundary_indices.append(boundary_points1_indices)
+    boundary_indices.append(boundary_points2_indices)
 
-        # src_pc = sfp(src_pc.unsqueeze(0), K=1000)[0].squeeze(0)
+    if PLOT_BOUNDARY:
+        # plot the target kps and mark the boundary points red
+        # Create a Plotly scatter plot
+        fig = go.Figure()
 
-        # Deform the point cloud
-        with torch.no_grad():
-            deform_points = net(src_pc)
-            deformed_pc = src_pc + deform_points
-            # deformed_pc = t0_src_pc + deform_points
-            # deformed_pc = net(src_pc)
+        all_tgt_kps = torch.cat(tgt_kps, 0).cpu().numpy()
+        # Add source key points
+        fig.add_trace(
+            go.Scatter3d(
+                x=all_tgt_kps[:, 0],
+                y=all_tgt_kps[:, 1],
+                z=all_tgt_kps[:, 2],
+                mode="markers",
+                marker=dict(size=5, color="blue"),
+                name="Source Key Points",
+            )
+        )
 
-        if idx == start:
-            t0_deformed_pc = deformed_pc.clone()
+        part_0_boundary_points = tgt_kps[0][boundary_points1_indices].cpu().numpy()
 
-        # Plot the point clouds
-        src_pc_plot = plot_pointcloud(src_pc, cur_log_dir, title=f"frame_{idx}_source")
-        deformed_pc_plot = plot_pointcloud(deformed_pc, cur_log_dir, title=f"frame_{idx}_deformed")
+        # Add target key points
+        fig.add_trace(go.Scatter3d(
+            x=part_0_boundary_points[:, 0],
+            y=part_0_boundary_points[:, 1],
+            z=part_0_boundary_points[:, 2],
+            mode='markers',
+            marker=dict(size=5, color='red'),
+            name='Target Key Points'
+        ))
 
-        src_pcs.append(src_pc_plot)
-        deformed_pcs.append(deformed_pc_plot)
+        part_1_boundary_points = tgt_kps[1][boundary_points2_indices].cpu().numpy()
 
-    imageio.mimsave(os.path.join(cur_log_dir, 'test_source_pc.mp4'), src_pcs, fps=10)
-    imageio.mimsave(os.path.join(cur_log_dir, 'test_deformed_pc.mp4'), deformed_pcs, fps=10)
+        # Add target key points
+        fig.add_trace(go.Scatter3d(
+            x=part_1_boundary_points[:, 0],
+            y=part_1_boundary_points[:, 1],
+            z=part_1_boundary_points[:, 2],
+            mode='markers',
+            marker=dict(size=5, color='purple'),
+            name='Target Key Points'
+        ))
+
+        # Set plot layout
+        fig.update_layout(
+            scene=dict(
+                xaxis_title='X',
+                yaxis_title='Y',
+                zaxis_title='Z'
+            ),
+            title='Boundary Points'
+        )
+
+        # Show the plot
+        fig.show()
+
+
+else:
+    for part_idx in range(2):
+        init_kps.append(
+            torch.from_numpy(
+                np.load(os.path.join(log_dir, f"part{part_idx}_src_kp.npy"))
+            ).float()
+        )
+        tgt_kps.append(
+            torch.from_numpy(
+                np.load(os.path.join(log_dir, f"part{part_idx}_tgt_kp.npy"))
+            ).float()
+        )
+        kp_indices.append(
+            np.load(os.path.join(log_dir, f"part{part_idx}_src_kp_idx.pth"))
+        )
 
 
 def smooth_point_cloud(point_clouds, window_size):
@@ -1016,11 +984,13 @@ if REG_DEFORM_NET:
     Regularize the point cloud
     """
 
-    n_iter = 2000
+    # n_iter = 2000
+    n_iter = 300
     batch_size = 10000
     robust_c = 0.2
-    cd_loss_w = 1000.0
-    # cd_loss_w = 1.0
+    # cd_loss_w = 1000.0
+    cd_loss_w = 1.0
+    # cd_loss_w = 2.0
     rigid_loss_w = 1.0
     # rigid_loss_w = 1000.0
     ldas_loss_w = 0.0
@@ -1030,11 +1000,15 @@ if REG_DEFORM_NET:
     # num_nn = 100
     num_nn_wing = 5
     # num_nn_body = 250
-    num_nn_body = 90
+    # num_nn_body = 90
+    num_nn_body = 24
     # num_nn_wing = num_nn_body = 100
     num_nns = [num_nn_wing, num_nn_body]
     concat_feature = True
     input_case = 0
+    # input_case = 1
+    # input_case = 2
+    # input_case = 3
     no_scale = False
     rotate_normal = True
     # add key point
@@ -1043,17 +1017,19 @@ if REG_DEFORM_NET:
     flip_normal = True
     # num_keypoints = 64
     # num_keypoints = 96
-    num_keypoints = 192
+    # num_keypoints = 192
     # num_keypoints_body = 64
     # num_keypoints_body = 256
-    num_keypoints_body = 96
+    # num_keypoints_body = 96
     # kp_knn = 5
     # kp_knn_body = 5
     # kp_knn_body = 50
     # kp_knn = 20
     kp_knn = 50
     motion_frame_skip = 200
-    kp_knn_body = 96
+    kp_knn_body = 24
+    # kp_knn_body = 24
+    # kp_knn_body = 48
     # kp_knn_body = 256
     # num_keypoints = 1024
     # kp_knn = 5
@@ -1064,10 +1040,22 @@ if REG_DEFORM_NET:
     smooth_inp_seq = False
     smooth_window_size = 35
 
-    reg_displacement = True
+    # reg_displacement = True
+    reg_displacement = False
+
+    pytorch3d_est_normal = True
 
     # test_transform_net = True
     test_transform_net = False
+
+    # force_smooth = True
+    force_smooth = False
+
+    force_smooth_full = True
+    smooth_knn = 50
+
+    reg_boundary = True
+    reg_boundary_test = False
 
     transform_L = 0
     loss_type = "L1_fix"
@@ -1103,37 +1091,15 @@ if REG_DEFORM_NET:
         if reg_displacement:
             cur_log_dir += "_regD"
 
-    elif no_scale:
-        cur_log_dir = os.path.join(
-            log_dir,
-            f"transform_L{transform_L}_cdw{cd_loss_w}_rigidw{rigid_loss_w}_ldasw{ldas_loss_w}_nn{num_nn}_no_scale",
-            # f"test_deformed_pc",
-        )
-    elif use_keypoints:
-        if flip_normal:
-            cur_log_dir = os.path.join(
-                log_dir,
-                f"transform_keypoint_num_{num_keypoints}_kpnn_{kp_knn}_cdw{cd_loss_w}_rigidw{rigid_loss_w}_ldasw{ldas_loss_w}_nn{num_nn}_flip",
-                # f"test_deformed_pc",
-            )
-        else:
-            cur_log_dir = os.path.join(
-                log_dir,
-                f"keypoint_num_{num_keypoints}_kpnn_{kp_knn}_cdw{cd_loss_w}_rigidw{rigid_loss_w}_ldasw{ldas_loss_w}_nn{num_nn}",
-                # f"test_deformed_pc",
-            )
-    elif rotate_normal:
-        cur_log_dir = os.path.join(
-            log_dir,
-            f"transform_L{transform_L}_cdw{cd_loss_w}_rigidw{rigid_loss_w}_ldasw{ldas_loss_w}_nn{num_nn}_rotate_normal",
-            # f"test_deformed_pc",
-        )
-    else:
-        cur_log_dir = os.path.join(
-            log_dir,
-            f"transform_L{transform_L}_cdw{cd_loss_w}_rigidw{rigid_loss_w}_ldasw{ldas_loss_w}_nn{num_nn}",
-            # f"test_deformed_pc",
-        )
+        if pytorch3d_est_normal:
+            cur_log_dir += "_p3dNorm"
+
+        if input_case > 0:
+            cur_log_dir += "_inp" + str(input_case)
+
+        if reg_boundary:
+            cur_log_dir += f"_RB{boundary_threshold}"
+
     os.makedirs(cur_log_dir, exist_ok=True)
 
     # copy current file to the log directory
@@ -1146,10 +1112,19 @@ if REG_DEFORM_NET:
     interval = motion_frame_skip
 
     src_pcs = [[] for _ in range(total_part_num)]
+    tgt_pcs = []
+    for part_idx in range(total_part_num):
+        if part_idx == 0:
+            # tgt_pcs.append(torch.tensor(tgt_pc[bird_wing_indices]).float())
+            tgt_pcs.append(tgt_pc[bird_wing_indices])
+        else:
+            # tgt_pcs.append(torch.tensor(tgt_pc[bird_body_indices]).float())
+            tgt_pcs.append(tgt_pc[bird_body_indices])
+
     deformed_pcs = [[] for _ in range(total_part_num)]
     if use_keypoints:
-        kp_indices = [[] for _ in range(total_part_num)]
-        init_kps   = [[] for _ in range(total_part_num)]
+        # kp_indices = [[] for _ in range(total_part_num)]
+        # init_kps   = [[] for _ in range(total_part_num)]
         key_points = [[] for _ in range(total_part_num)]
 
     ########## Load the point cloud by parts ##########
@@ -1170,18 +1145,6 @@ if REG_DEFORM_NET:
             src_pc = src_pc.cpu()
         else:
             src_pc = torch.tensor(raw_pcs[idx]).float()
-        # for idx in tqdm.tqdm(range(start, end, interval)):
-        # if idx > 0:
-        #     src_pc_path = os.path.join(src_pc_dir, f"points_{idx}.npy")
-        #     src_pc = np.load(src_pc_path)
-
-        #     # src_pc = torch.tensor(src_pc).float().to(device)
-        #     src_pc = torch.tensor(src_pc).float()
-
-        #     scale = 10.0
-        #     src_pc = src_pc / scale
-        # else:
-        #     src_pc = src_pc.cpu()
 
         for part_idx in range(total_part_num):
             if part_idx == 0:
@@ -1212,13 +1175,13 @@ if REG_DEFORM_NET:
                         if DENSIFY_BODY:
                             cur_src_pc = src_pc[but_body_indices]
                     # apply farthest point sampling to get the keypoints
-                    init_kps[part_idx], kp_indices[part_idx] = sfp(
-                        cur_src_pc.unsqueeze(0), K=cur_num_keypoints
-                    )
+                    # init_kps[part_idx], kp_indices[part_idx] = sfp(
+                    #     cur_src_pc.unsqueeze(0), K=cur_num_keypoints
+                    # )
 
             if use_keypoints:
                 key_points[part_idx].append(
-                    cur_src_pc[kp_indices[part_idx][0]].cpu().clone()
+                    cur_src_pc[kp_indices[part_idx][0].cpu()].clone()
                 )
             else:
                 src_pcs[part_idx].append(cur_src_pc)
@@ -1233,6 +1196,18 @@ if REG_DEFORM_NET:
             src_pcs[part_idx] = torch.stack(src_pcs[part_idx], dim=0)
             print(f"src_pcs[{part_idx}]: ", src_pcs[part_idx].shape)
 
+    # augment the key points to include the boundary points
+    if reg_boundary:
+        augmented_key_points = [
+            torch.cat([key_points[0], key_points[1][:, boundary_indices[1], :]], dim=1),
+            torch.cat([key_points[1], key_points[0][:, boundary_indices[0], :]], dim=1)
+        ]
+        augmented_tgt_kps = [
+            torch.cat([tgt_kps[0], tgt_kps[1][boundary_indices[1]]], dim=0),
+            torch.cat([tgt_kps[1], tgt_kps[0][boundary_indices[0]]], dim=0)
+        ]
+        num_augmented_pts = [kp.shape[1] for kp in augmented_key_points]
+
     # num_steps = src_pcs[0].shape[0]
     if use_keypoints:
         num_steps = key_points[0].shape[0]
@@ -1243,6 +1218,8 @@ if REG_DEFORM_NET:
     if regularize_kp_only:
         for part_idx in range(total_part_num):
             num_pts[part_idx] = key_points[part_idx].shape[1] 
+    if reg_boundary:
+        num_pts = [kp.shape[1] for kp in augmented_key_points]
     if reg_displacement:
         dist_to_nn = [
             torch.empty(num_pts[part_idx], num_nns[part_idx], 3)
@@ -1255,69 +1232,15 @@ if REG_DEFORM_NET:
     nn_indices = [torch.empty(num_pts[part_idx], num_nns[part_idx]) for part_idx in range(total_part_num)]
     nn_weights = [torch.empty(num_pts[part_idx], num_nns[part_idx]) for part_idx in range(total_part_num)]
     nn_init_positions = [torch.empty(num_pts[part_idx], num_nns[part_idx], 3) for part_idx in range(total_part_num)]
+
     # dist_to_nn = torch.empty(num_pts, num_nn)
     # nn_indices = torch.empty(num_pts, num_nn)
     # nn_weights = torch.empty(num_pts, num_nn)
 
-    if USE_POINTNET:
-        if CONCAT_POS_DEFORM:
-            reg_net = DeformNet(
-                2048, 3, hidden_dim=hidden_dim, num_layers=num_layers, L=L, pt_dim=3
-            ).to(device)
-        else:
-            reg_net = DeformNet(2048, 3, hidden_dim=hidden_dim, num_layers=num_layers, L=L).to(device)
-    else:
-        reg_net = DeformNet(3, 3, hidden_dim=hidden_dim, num_layers=num_layers, L=L).to(device)
-
     pc_images = []
-    deformed_src_pc_start = []
-
-    with torch.no_grad():
-        if USE_POINTNET:
-            pointnet = pointnet(normal_channel=False).to(device)
-            checkpoint = torch.load("best_model.pth")
-            pointnet.load_state_dict(checkpoint["model_state_dict"])
-            pointnet.eval()
-            point_feat = pointnet(
-                pc_normalize(full_src_pc.to(device)).unsqueeze(0).transpose(2, 1)
-            ).transpose(2, 1)[0]
-        #     init_displacement = reg_net(point_feat.unsqueeze(0))
-        # else:
-        #     init_displacement = reg_net(src_pcs[0:1].to(device))
-        for part_idx in range(total_part_num):
-            reg_net.load_state_dict(torch.load(os.path.join(log_dir, f"deform_net_{part_idx}.pth")))
-
-            if part_idx == 0:
-                cur_src_pc = full_src_pc[but_wing_indices]
-                cur_point_feat = point_feat[but_wing_indices]
-            else:
-                # but_body_indices = np.setdiff1d(np.arange(len(src_pc)), but_wing_indices)
-                if DENSIFY_BODY:
-                    cur_src_pc = full_src_pc[but_body_indices_concat]
-                    cur_point_feat = point_feat[but_body_indices_concat]
-                else:
-                    cur_src_pc = full_src_pc[but_body_indices]
-                    cur_point_feat = point_feat[but_body_indices]
-
-            if USE_POINTNET:
-                if CONCAT_POS_DEFORM:
-                    init_displacement = reg_net(cur_point_feat, pt=cur_src_pc.to(device))
-                else:
-                    init_displacement = reg_net(cur_point_feat)
-            else:
-                init_displacement = reg_net(src_pcs[part_idx].to(device))
-            # deformed_src_pc = src_pcs[part_idx] + init_displacement
-            # deformed_src_pc_start.append(src_pcs[part_idx][0].cpu() + init_displacement.detach().cpu().clone())
-            deformed_src_pc_start.append(
-                src_pcs[part_idx][0].to(device) + init_displacement.detach().clone()
-            )
-        # deformed_src_pc = src_pcs[0] + init_displacement[0].detach().cpu().clone()
-        # deformed_src_pc = (
-        #     src_pcs[0] + reg_net(src_pcs[0].to(device)).detach().cpu().clone()
-        # )
 
     # release the memory of reg_net
-    del reg_net
+    # del reg_net
     if USE_POINTNET:
         del pointnet
 
@@ -1340,8 +1263,8 @@ if REG_DEFORM_NET:
             else:
                 cur_kp_knn = kp_knn_body
             pred_deformed_pc, deformed_pc_weight, deformed_nn_ind = parametertize_pc(
-                deformed_src_pc_start[part_idx],
-                deformed_src_pc_start[part_idx][kp_indices[part_idx][0]],
+                tgt_pcs[part_idx].to(device),
+                tgt_kps[part_idx].to(device),
                 cur_kp_knn,
                 step=35000,
             )
@@ -1359,6 +1282,11 @@ if REG_DEFORM_NET:
             #     normal_rotation_matrices[:, kp_indices[0], :, :],
             #     init_displacement[:, kp_indices[0], :].detach().cpu().expand(len(sample_steps), -1, -1).unsqueeze(-1),
             # ).squeeze(-1) + key_points[sample_steps]
+            pc_img = plot_pointcloud(
+                pred_deformed_pc,
+                cur_log_dir,
+                title=f"Pred PC Part {part_idx}",
+            )
 
             normal_rotation_matrices, pred_normal = (
                 compute_rotation_matrices_for_batch(
@@ -1368,9 +1296,7 @@ if REG_DEFORM_NET:
             pred_normals.append(pred_normal)
             ori_kp_deform = torch.matmul(
                 normal_rotation_matrices,
-                (deformed_src_pc_start[part_idx] - src_pcs[part_idx][0].to(device))[
-                    kp_indices[part_idx][0]
-                ]
+                (tgt_kps[part_idx] - init_kps[part_idx])
                 .expand(len(normal_rotation_matrices), -1, -1)
                 .unsqueeze(-1)
                 .cpu(),
@@ -1429,10 +1355,10 @@ if REG_DEFORM_NET:
         print(a)
 
     if concat_feature:
-        if input_case == 0:
+        if input_case == 0 or input_case == 2:
             transform_net = AffineTransformationNet(9, L=transform_L).to(device)
-        elif input_case == 1:
-            transform_net = AffineTransformationNet(9, L=transform_L).to(device)
+        elif input_case == 1 or input_case == 3:
+            transform_net = AffineTransformationNet(9, L=transform_L, non_pe_dim=1).to(device)
         else:
             transform_net = AffineTransformationNet(6, L=transform_L).to(device)
     else:
@@ -1447,14 +1373,19 @@ if REG_DEFORM_NET:
             for part_idx in range(total_part_num):
 
                 if use_keypoints:
-                    pc_inp = key_points[part_idx][sample_steps]
+                    if input_case == 2 or input_case == 3:
+                        pc_inp = key_points[part_idx][0:1].expand(len(sample_steps), -1, -1)
+                        base_pc = key_points[part_idx][sample_steps]
+                    else:
+                        pc_inp = base_pc = key_points[part_idx][sample_steps]
+
                     vis_base_displacement = vis_ori_kp_deforms[part_idx]
                 else:
                     pc_inp = src_pcs[sample_steps]
                     vis_base_displacement = init_displacement
 
                 if concat_feature:
-                    if input_case == 0:
+                    if input_case == 0 or input_case == 2:
                         scale, quaternion = transform_net(
                             torch.cat(
                                 [
@@ -1466,6 +1397,24 @@ if REG_DEFORM_NET:
                                 ],
                                 dim=-1,
                             )
+                        )
+                    elif input_case == 1 or input_case == 3:
+                        scale, quaternion = transform_net(
+                            torch.cat(
+                                [
+                                    pc_inp.to(device),
+                                    pred_normals[part_idx][0:1]
+                                    .expand(len(sample_steps), -1, -1)
+                                    .to(device),
+                                    pred_normals[part_idx][sample_steps].to(device),
+                                ],
+                                dim=-1,
+                            ),
+                            non_pe=sample_steps.unsqueeze(-1)
+                            .unsqueeze(-1)
+                            .expand(-1, all_num_keypoints[part_idx], -1)
+                            .float()
+                            .to(device),
                         )
                     else:
                         scale, quaternion = transform_net(
@@ -1485,7 +1434,7 @@ if REG_DEFORM_NET:
                     scale,
                     rotation_matrix,
                     no_scale=no_scale,
-                ) + pc_inp.to(device)
+                ) + base_pc.to(device)
                 # deformed_src_pcs = vis_base_displacement.to(device) + pc_inp.to(device)
                 if use_keypoints:
                     deformed_pcs = []
@@ -1509,17 +1458,23 @@ if REG_DEFORM_NET:
     def save_all_deformed_pcs():
         with torch.no_grad():
             total_deformed_pc = []
+            cur_order = [1, 0] if reg_boundary_test else range(total_part_num)
 
-            for part_idx in range(total_part_num):
+            # for part_idx in range(total_part_num):
+            for part_idx in cur_order:
                 if use_keypoints:
-                    pc_inp = key_points[part_idx]
+                    if input_case == 2 or input_case == 3:
+                        pc_inp = key_points[part_idx][0:1].expand(num_steps, -1, -1)
+                        base_pc = key_points[part_idx]
+                    else:
+                        pc_inp = base_pc = key_points[part_idx]
                     vis_base_displacement = ori_kp_deforms[part_idx]
                 else:
                     pc_inp = src_pcs[sample_steps]
                     vis_base_displacement = init_displacement
 
                 if concat_feature:
-                    if input_case == 0:
+                    if input_case == 0 or input_case == 2:
                         scale, quaternion = transform_net(
                             torch.cat(
                                 [
@@ -1531,6 +1486,25 @@ if REG_DEFORM_NET:
                                 ],
                                 dim=-1,
                             )
+                        )
+                    elif input_case == 1 or input_case == 3:
+                        scale, quaternion = transform_net(
+                            torch.cat(
+                                [
+                                    pc_inp.to(device),
+                                    pred_normals[part_idx][0:1]
+                                    .expand(num_steps, -1, -1)
+                                    .to(device),
+                                    pred_normals[part_idx].to(device),
+                                ],
+                                dim=-1,
+                            ),
+                            non_pe=torch.arange(num_steps)
+                            .unsqueeze(-1)
+                            .unsqueeze(-1)
+                            .expand(-1, all_num_keypoints[part_idx], -1)
+                            .float()
+                            .to(device),
                         )
                     else:
                         scale, quaternion = transform_net(
@@ -1550,8 +1524,56 @@ if REG_DEFORM_NET:
                     scale,
                     rotation_matrix,
                     no_scale=no_scale,
-                ) + pc_inp.to(device)
+                ) + base_pc.to(device)
                 # deformed_src_pcs = vis_base_displacement.to(device) + pc_inp.to(device)
+                if force_smooth:
+                    for time_step in range(1, num_steps):
+                        avg_displacement = (
+                            deformed_src_pcs[time_step]
+                            .view(num_pts[part_idx], 1, 3)
+                            .expand(num_pts[part_idx], num_nns[part_idx], 3)
+                            .gather(
+                                0,
+                                nn_indices[part_idx][:, :num_nns[part_idx]]
+                                .to(device)
+                                .unsqueeze(-1)
+                                .expand(num_pts[part_idx], num_nns[part_idx], 3),
+                            )
+                            - nn_init_positions[part_idx]
+                            .view(num_pts[part_idx], 1, 3)
+                            .expand(num_pts[part_idx], num_pts[part_idx], 3)
+                            .gather(
+                                0,
+                                nn_indices[part_idx][:, :num_nns[part_idx]]
+                                .to(device)
+                                .unsqueeze(-1)
+                                .expand(num_pts[part_idx], num_nns[part_idx], 3),
+                            )
+                        ).mean(dim=1)
+                        deformed_src_pcs[time_step] = (
+                            avg_displacement + nn_init_positions[part_idx]
+                        )
+
+                if reg_boundary_test:
+                    # calculate the initial mean displacement between the sets of two boundary points
+                    # mean_bound_displacement = torch.mean(
+                    #     tgt_kps[0][boundary_indices[0]], dim=0) - torch.mean(tgt_kps[1][boundary_indices[1]], dim=0
+                    # )
+                    if part_idx == 1:
+                        anchor_kps = deformed_src_pcs.clone()
+                    else:
+                        cur_mean_bound_displacement = torch.mean(
+                            deformed_src_pcs[:, boundary_indices[0]], dim=1) - torch.mean(
+                            - anchor_kps[:, boundary_indices[1]],
+                            dim=1,
+                        ) # shape (num_steps, 3)
+                        # print(f"!!!!cur_mean_bound_displacement: {cur_mean_bound_displacement.shape}")
+                        # print("mean displacement", mean_bound_displacement)
+                        # print("$$$$$")
+                        # print("cur_mean_bound_displacement", cur_mean_bound_displacement[:5])
+                        # deformed_src_pcs = deformed_src_pcs + (mean_bound_displacement.to(device) - cur_mean_bound_displacement).unsqueeze(1).expand(-1, num_pts[part_idx], -1)
+                        deformed_src_pcs = deformed_src_pcs - (cur_mean_bound_displacement[0:1, :] - cur_mean_bound_displacement).unsqueeze(1).expand(-1, num_pts[part_idx], -1)
+
                 if use_keypoints:
                     deformed_pcs = []
                     for deformed_kp in deformed_src_pcs:
@@ -1563,13 +1585,70 @@ if REG_DEFORM_NET:
                             )
                         )
                     total_deformed_pc.append(torch.stack(deformed_pcs, dim=0))
+
+                if force_smooth_full:
+                    base_pc = total_deformed_pc[-1][0]
+                    cur_num_pts = base_pc.shape[0]
+
+                    nn_indices = torch.empty(cur_num_pts, smooth_knn, dtype=torch.int64, device=device)
+                    for pt_idx in range(cur_num_pts):
+                        # find the distance from the point at index i to all others points
+                        displacement_to_all_pts = (
+                            base_pc[pt_idx : pt_idx + 1, :].expand(cur_num_pts, 3)
+                            - base_pc
+                        )
+                        _, inds = torch.topk(
+                            displacement_to_all_pts.pow(2).sum(dim=1),
+                            smooth_knn + 1,
+                            largest=False,
+                            sorted=True,
+                        )
+                        nn_indices[pt_idx, :] = inds[1:].type(torch.int64)
+
+                    for time_step in range(1, num_steps):
+                        avg_displacement = (
+                            total_deformed_pc[-1][time_step]
+                            .view(cur_num_pts, 1, 3)
+                            .expand(cur_num_pts, cur_num_pts, 3)
+                            .gather(
+                                0,
+                                nn_indices
+                                .to(device)
+                                .unsqueeze(-1)
+                                .expand(cur_num_pts, smooth_knn, 3),
+                            )
+                            - base_pc.view(cur_num_pts, 1, 3)
+                            .expand(cur_num_pts, cur_num_pts, 3)
+                            .gather(
+                                0,
+                                nn_indices
+                                .to(device)
+                                .unsqueeze(-1)
+                                .expand(cur_num_pts, smooth_knn, 3),
+                            )
+                        ).mean(dim=1)
+                        total_deformed_pc[-1][time_step] = avg_displacement + base_pc
+
+            if reg_boundary_test:
+                # swap the two parts in total_deformed_pc
+                total_deformed_pc[0], total_deformed_pc[1] = total_deformed_pc[1], total_deformed_pc[0]
             total_deformed_pc = torch.cat(total_deformed_pc, dim=1) # shape (num_steps, num_pts, 3)
 
-        # save the total deformed point cloud as a pytorch tensor
-        torch.save(total_deformed_pc, os.path.join(cur_log_dir, "total_deformed_pc.pth"))
+        if force_smooth:
+            torch.save(total_deformed_pc, os.path.join(cur_log_dir, "total_deformed_pc_smooth.pth"))
+        elif force_smooth_full:
+            if smooth_knn != 100:
+                torch.save(total_deformed_pc, os.path.join(cur_log_dir, f"total_deformed_pc_smooth_full_{smooth_knn}.pth"))
+            else:
+                torch.save(total_deformed_pc, os.path.join(cur_log_dir, "total_deformed_pc_smooth_full.pth"))
+        # elif reg_boundary:
+        #     torch.save(total_deformed_pc, os.path.join(cur_log_dir, "total_deformed_pc_rb.pth"))
+        else:
+            # save the total deformed point cloud as a pytorch tensor
+            torch.save(total_deformed_pc, os.path.join(cur_log_dir, "total_deformed_pc.pth"))
         # save the initial deformed point cloud at start state
         torch.save(
-            torch.cat(deformed_src_pc_start, dim=0),
+            torch.cat(pred_deformed_pcs, dim=0),
             os.path.join(cur_log_dir, "deformed_src_pc_start.pth"),
         )
 
@@ -1577,14 +1656,18 @@ if REG_DEFORM_NET:
         with torch.no_grad():
             for part_idx in range(total_part_num):
                 if use_keypoints:
-                    pc_inp = key_points[part_idx]
+                    if input_case == 2 or input_case == 3:
+                        pc_inp = key_points[part_idx][0:1].expand(num_steps, -1, -1)
+                        base_pc = key_points[part_idx]
+                    else:
+                        pc_inp = base_pc = key_points[part_idx]
                     vis_base_displacement = ori_kp_deforms[part_idx]
                 else:
                     pc_inp = src_pcs[sample_steps]
                     vis_base_displacement = init_displacement
 
                 if concat_feature:
-                    if input_case == 0:
+                    if input_case == 0 or input_case == 2:
                         scale, quaternion = transform_net(
                             torch.cat(
                                 [
@@ -1596,6 +1679,25 @@ if REG_DEFORM_NET:
                                 ],
                                 dim=-1,
                             )
+                        )
+                    elif input_case == 1 or input_case == 3:
+                        scale, quaternion = transform_net(
+                            torch.cat(
+                                [
+                                    pc_inp.to(device),
+                                    pred_normals[part_idx][0:1]
+                                    .expand(num_steps, -1, -1)
+                                    .to(device),
+                                    pred_normals[part_idx].to(device),
+                                ],
+                                dim=-1,
+                            ),
+                            non_pe=torch.arange(num_steps)
+                            .unsqueeze(-1)
+                            .unsqueeze(-1)
+                            .expand(-1, all_num_keypoints[part_idx], -1)
+                            .float()
+                            .to(device),
                         )
                     else:
                         scale, quaternion = transform_net(
@@ -1615,33 +1717,51 @@ if REG_DEFORM_NET:
                     scale,
                     rotation_matrix,
                     no_scale=no_scale,
-                ) + pc_inp.to(device)
+                ) + base_pc.to(device)
 
                 # save the total deformed point cloud as a pytorch tensor
                 torch.save(
                     deformed_src_pcs, os.path.join(cur_log_dir, f"total_deformed_kps_p{part_idx}.pth")
                 )
 
-    if test_transform_net:
-        transform_net.load_state_dict(
-            torch.load(os.path.join(cur_log_dir, "transform_net.pth"))
-        )
-        # visualize_time_steps(pc_images, cur_log_dir, num_steps, n_iter + 1)
-        # save_all_deformed_pcs()
-        save_deformed_kps()
-        exit(0)
+    # if test_transform_net:
+    #     transform_net.load_state_dict(
+    #         torch.load(os.path.join(cur_log_dir, "transform_net.pth"))
+    #     )
+    #     # visualize_time_steps(pc_images, cur_log_dir, num_steps, n_iter + 1)
+    #     # save_all_deformed_pcs()
+    #     save_deformed_kps()
+    #     exit(0)
 
-    # ===== old optimizer of the deform net =====
-    # optimizer = torch.optim.Adam(reg_net.parameters(), lr=0.0005)
-    optimizer = torch.optim.Adam(transform_net.parameters(), lr=0.0005)
+    # # ===== old optimizer of the deform net =====
+    # # optimizer = torch.optim.Adam(reg_net.parameters(), lr=0.0005)
+    # optimizer = torch.optim.Adam(transform_net.parameters(), lr=0.0005)
 
     if use_keypoints:
         if regularize_kp_only:
-            base_dist_pcs = [deformed_src_pc_start[part_idx][kp_indices[part_idx][0]] for part_idx in range(total_part_num)]
+            base_dist_pcs = tgt_kps
             base_displacement = ori_kp_deforms
         else:
             base_dist_pcs = pred_deformed_pcs
             base_displacement = ori_kp_deforms
+        if reg_boundary:
+            base_dist_pcs = augmented_tgt_kps
+            base_displacement = augmented_ori_kp_deforms = [
+                torch.cat(
+                    [ori_kp_deforms[0], ori_kp_deforms[1][:, boundary_indices[1]]], dim=1
+                ),
+                torch.cat(
+                    [ori_kp_deforms[1], ori_kp_deforms[0][:, boundary_indices[0]]], dim=1
+                ),
+            ]
+            augmented_pred_normals = [
+                torch.cat(
+                    [pred_normals[0], pred_normals[1][:, boundary_indices[1]]], dim=1
+                ),
+                torch.cat(
+                    [pred_normals[1], pred_normals[0][:, boundary_indices[0]]], dim=1
+                ),
+            ]
     else:
         base_dist_pcs = deformed_src_pc
         base_displacement = init_displacement
@@ -1691,6 +1811,39 @@ if REG_DEFORM_NET:
         # nn_init_positions = deformed_src_pc.detach().clone().to(device)
         nn_init_positions[part_idx] = base_dist_pcs[part_idx].to(device)
 
+    # find the original distances between boundary points
+    num_bound_pts = [
+        len(boundary_indices[part_idx]) for part_idx in range(total_part_num)
+    ]
+    # # find the the l2 distance bewtwen each pair of boundary points
+    # boundary_dists = torch.norm(
+    #     base_dist_pcs[0][boundary_indices[0]].unsqueeze(1).expand(
+    #         num_bound_pts[0], num_bound_pts[1], 3
+    #     ) - base_dist_pcs[1][boundary_indices[1]].unsqueeze(0).expand(
+    #         num_bound_pts[0], num_bound_pts[1], 3
+    #     ),
+    #     dim=2,
+    # )
+
+    if test_transform_net:
+        if reg_boundary_test:
+            # load the experiment log dir without "_RB"
+            transform_net.load_state_dict(
+                torch.load(os.path.join(cur_log_dir[:-3], "transform_net.pth"))
+            )
+        else:
+            transform_net.load_state_dict(
+                torch.load(os.path.join(cur_log_dir, "transform_net.pth"))
+            )
+        # visualize_time_steps(pc_images, cur_log_dir, num_steps, n_iter + 1)
+        save_all_deformed_pcs()
+        # save_deformed_kps()
+        exit(0)
+
+    # ===== old optimizer of the deform net =====
+    # optimizer = torch.optim.Adam(reg_net.parameters(), lr=0.0005)
+    optimizer = torch.optim.Adam(transform_net.parameters(), lr=0.0005)
+
     bird_body_indices = np.setdiff1d(np.arange(len(tgt_pc)), bird_wing_indices)
     progress_bar = tqdm.tqdm(range(n_iter), desc="Training")
 
@@ -1703,7 +1856,7 @@ if REG_DEFORM_NET:
         if i % 20 == 0:
             visualize_time_steps(pc_images, cur_log_dir, num_steps, i)
             # print(a)
-        if i % 100 == 0:
+        if i % 100 == 0 or i == 50:
             torch.save(
                 transform_net.state_dict(),
                 os.path.join(cur_log_dir, "transform_net.pth"),
@@ -1731,18 +1884,17 @@ if REG_DEFORM_NET:
             # ) + src_pcs.to(device)
             # total_cd_loss = chamfer_distance(deformed_src_pcs[0:1], tgt_pc.unsqueeze(0))[0]
 
-            if use_keypoints:
-                inp_pcs = key_points
-            else:
-                inp_pcs = src_pcs
-
             for part_idx in range(total_part_num):
+                if use_keypoints:
+                    inp_pcs = key_points
+                    base_displacement = ori_kp_deforms
+                else:
+                    inp_pcs = src_pcs
+
                 num_nn = num_nns[part_idx]
                 total_reg_loss = 0
                 if regularize_kp_only:
-                    cur_tgt_pc = deformed_src_pc_start[part_idx][
-                        kp_indices[part_idx][0]
-                    ]
+                    cur_tgt_pc = tgt_pcs[part_idx]
                 else:
                     if part_idx == 0:
                         cur_tgt_pc = tgt_pc[bird_wing_indices]
@@ -1750,7 +1902,7 @@ if REG_DEFORM_NET:
                         cur_tgt_pc = tgt_pc[bird_body_indices]
 
                 if concat_feature:
-                    if input_case == 0:
+                    if input_case == 0 or input_case == 2:
                         scale, quaternion = transform_net(
                             torch.cat(
                                 [
@@ -1760,6 +1912,22 @@ if REG_DEFORM_NET:
                                 ],
                                 dim=-1,
                             )
+                        )
+                    elif input_case == 1 or input_case == 3:
+                        scale, quaternion = transform_net(
+                            torch.cat(
+                                [
+                                    inp_pcs[part_idx][0].to(device),
+                                    pred_normals[part_idx][0].to(device),
+                                    pred_normals[part_idx][0].to(device),
+                                ],
+                                dim=-1,
+                            ),
+                            non_pe=torch.tensor([0])
+                            .unsqueeze(-1)
+                            .expand(all_num_keypoints[part_idx], -1)
+                            .float()
+                            .to(device),
                         )
                     else:
                         scale, quaternion = transform_net(
@@ -1821,17 +1989,66 @@ if REG_DEFORM_NET:
                 #     cd_weight = 0
                 # total_cd_loss += cd_loss * cd_weight
                 # ===== comment out the chamfer distance loss =====
+                if reg_boundary:
+                    inp_pcs = augmented_key_points
+                    cur_pred_normals = augmented_pred_normals
+                    base_displacement = augmented_ori_kp_deforms
+                else:
+                    cur_pred_normals = pred_normals
                 if concat_feature:
                     if input_case == 0:
                         scale, quaternion = transform_net(
                             torch.cat(
                                 [
                                     inp_pcs[part_idx][j].to(device),
-                                    pred_normals[part_idx][0].to(device),
-                                    pred_normals[part_idx][j].to(device),
+                                    cur_pred_normals[part_idx][0].to(device),
+                                    cur_pred_normals[part_idx][j].to(device),
                                 ],
                                 dim=-1,
                             )
+                        )
+                    elif input_case == 1:
+                        scale, quaternion = transform_net(
+                            torch.cat(
+                                [
+                                    inp_pcs[part_idx][j].to(device),
+                                    cur_pred_normals[part_idx][0].to(device),
+                                    cur_pred_normals[part_idx][j].to(device),
+                                ],
+                                dim=-1,
+                            ),
+                            non_pe=torch.tensor([j])
+                            .unsqueeze(-1)
+                            .expand(all_num_keypoints[part_idx], -1)
+                            .float()
+                            .to(device),
+                        )
+                    elif input_case == 2:
+                        scale, quaternion = transform_net(
+                            torch.cat(
+                                [
+                                    inp_pcs[part_idx][0].to(device),
+                                    cur_pred_normals[part_idx][0].to(device),
+                                    cur_pred_normals[part_idx][j].to(device),
+                                ],
+                                dim=-1,
+                            )
+                        )
+                    elif input_case == 3:
+                        scale, quaternion = transform_net(
+                            torch.cat(
+                                [
+                                    inp_pcs[part_idx][0].to(device),
+                                    cur_pred_normals[part_idx][0].to(device),
+                                    cur_pred_normals[part_idx][j].to(device),
+                                ],
+                                dim=-1,
+                            ),
+                            non_pe=torch.tensor([j])
+                            .unsqueeze(-1)
+                            .expand(all_num_keypoints[part_idx], -1)
+                            .float()
+                            .to(device),
                         )
                     else:
                         scale, quaternion = transform_net(
@@ -2056,10 +2273,84 @@ if REG_DEFORM_NET:
                 # tqdm.tqdm.write(
                 #     f"Loss: {loss.item()}, Reg Loss: {total_reg_loss.item()}, CD Loss: {total_cd_loss.item()}"
                 # )
-                if i % 10 == 0:
-                    progress_bar.set_description(
-                        f"Training (Loss: {loss.item():.4f}) Reg Loss: {total_reg_loss.item():.4f}, CD Loss: {total_cd_loss.item():.4f}"
-                    )
+            if i % 10 == 0:
+                progress_bar.set_description(
+                    f"Training (Loss: {loss.item():.4f}) Reg Loss: {total_reg_loss.item():.4f}, CD Loss: {total_cd_loss.item():.4f}"
+                )
+
+            # if reg_boundary:
+            #     deformed_bound_pts = []
+            #     loss = 0.0
+            #     for part_idx in range(total_part_num):
+            #         cur_tgt_pc = tgt_pcs[part_idx]
+            #         if input_case == 0 or input_case == 2:
+            #             scale, quaternion = transform_net(
+            #                 torch.cat(
+            #                     [
+            #                         inp_pcs[part_idx][0].to(device),
+            #                         pred_normals[part_idx][0].to(device),
+            #                         pred_normals[part_idx][0].to(device),
+            #                     ],
+            #                     dim=-1,
+            #                 )
+            #             )
+            #         rotation_matrix = quaternion_to_matrix(quaternion)
+            #         deformed_src_pcs = apply_transformation(
+            #             base_displacement[part_idx][0].to(
+            #                 device
+            #             ),
+            #             scale,
+            #             rotation_matrix,
+            #             no_scale=no_scale,
+            #         ) + inp_pcs[part_idx][0].to(device)
+            #         loss += chamfer_distance(
+            #             deformed_src_pcs.unsqueeze(0), cur_tgt_pc.unsqueeze(0)
+            #         )[0]
+
+            #         if input_case == 0:
+            #             scale, quaternion = transform_net(
+            #                 torch.cat(
+            #                     [
+            #                         inp_pcs[part_idx][j][boundary_indices[part_idx]].to(
+            #                             device
+            #                         ),
+            #                         pred_normals[part_idx][0][
+            #                             boundary_indices[part_idx]
+            #                         ].to(device),
+            #                         pred_normals[part_idx][j][
+            #                             boundary_indices[part_idx]
+            #                         ].to(device),
+            #                     ],
+            #                     dim=-1,
+            #                 )
+            #             )
+            #         rotation_matrix = quaternion_to_matrix(quaternion)
+            #         deformed_bound_pts.append(apply_transformation(
+            #             base_displacement[part_idx][j][boundary_indices[part_idx]].to(
+            #                 device
+            #             ),
+            #             scale,
+            #             rotation_matrix,
+            #             no_scale=no_scale,
+            #         ) + inp_pcs[part_idx][j][boundary_indices[part_idx]].to(device))
+
+            #     # add boundary loss
+            #     cur_boundary_dists = torch.norm(
+            #         deformed_bound_pts[0].unsqueeze(1).expand(
+            #             num_bound_pts[0], num_bound_pts[1], 3
+            #         )
+            #         - deformed_bound_pts[1]
+            #         .unsqueeze(0)
+            #         .expand(num_bound_pts[0], num_bound_pts[1], 3),
+            #         dim=2,
+            #     )
+            #     optimizer.zero_grad()
+            #     loss += (cur_boundary_dists - boundary_dists.to(device)).abs().sum() / (
+            #         num_bound_pts[0] * num_bound_pts[1]
+            #     )
+            #     loss.backward()
+            #     optimizer.step()
+
             # loss = total_reg_loss + cd_loss_w * total_cd_loss
             # optimizer.zero_grad()
             # loss.backward()

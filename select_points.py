@@ -39,7 +39,12 @@ def load_xyz(file_path):
             points.append([x, y, z])
     return np.array(points)
 
-subset_pc_path = "/NAS/spa176/papr-retarget/but_pc_0_wings.xyz"
+# original_points = load_xyz("/NAS/spa176/papr-retarget/but_pc_0_wings.xyz")
+original_points = load_xyz("/NAS/spa176/papr-retarget/hummingbird_wing_pc.xyz")
+
+# subset_pc_path = "/NAS/spa176/papr-retarget/but_pc_0_wings_right.xyz"
+subset_pc_path = "/NAS/spa176/papr-retarget/hummingbird_wing_pc_right.xyz"
+# subset_pc_path = "/NAS/spa176/papr-retarget/but_pc_0_wings.xyz"
 # subset_pc_path = "/NAS/spa176/papr-retarget/hummingbird_wing_pc.xyz"
 subset_points = load_xyz(subset_pc_path)
 
@@ -52,5 +57,8 @@ print(f"Original point length: {len(original_points)}")
 print(f"Length of indices of subset points in the original point cloud: {len(indices)}")
 
 # Save the indices to a file
-np.save("but_wing_indices.npy", indices)
+# np.save("but_wing_indices_right.npy", indices)
+np.save("hummingbird_wing_indices_right.npy", indices)
+# np.save("but_wing_indices.npy", indices)
+
 # np.save("hummingbird_wing_indices.npy", indices)

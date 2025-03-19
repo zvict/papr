@@ -508,7 +508,7 @@ def plot_all(frame, testloader, args, model, device, smooth):
 
     # load all the pc files
     # pcs = [np.load(pc_file) if isinstance(pc_file, str) else pc_file for pc_file in pc_files]
-    total_deformed_pcs = total_deformed_pcs.cpu().numpy()
+    total_deformed_pcs = total_deformed_pcs.detach().cpu().numpy()
     total_deformed_pcs = [
         total_deformed_pcs[i] for i in range(total_deformed_pcs.shape[0])
     ]

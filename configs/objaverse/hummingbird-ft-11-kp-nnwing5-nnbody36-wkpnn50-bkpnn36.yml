@@ -1,6 +1,6 @@
-index: "hummingbird-ft-7-kp-nnwing5-nnbody90-wkpnn50-bkpnn96-regD"
+index: "hummingbird-ft-11-kp-nnwing5-nnbody36-wkpnn50-bkpnn36"
 train: true
-load_path: "hummingbird-ft-7-kp-nnwing5-nnbody90-wkpnn50-bkpnn96-regD"
+load_path: "hummingbird-ft-11-kp-nnwing5-nnbody36-wkpnn50-bkpnn36"
 save_dir: "./experiments"
 seed: 1
 eps: 1.0e-6

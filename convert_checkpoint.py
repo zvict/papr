@@ -6,17 +6,83 @@ from mpl_toolkits.mplot3d import Axes3D
 from pytorch3d.ops import iterative_closest_point as icp
 import os
 
+
+nn_body = 24
+kpnn_body = 24
+body_kp = 256
+wing_kp = 96
+# wing_kp = 192
+# body_kp = 512
+# reg_D = True
+reg_D = False
+inp_case = 0
+# force_smooth = True
+force_smooth = False
+force_smooth_full = True
+smooth_knn = 50
+
+# reg_boundary = True
+reg_boundary = False
+boundary_threshold = 0.05
+
+if body_kp == 256:
+    target_exp_index = 9
+elif body_kp == 512:
+    target_exp_index = 11
+elif body_kp == 192:
+    target_exp_index = 10
+elif body_kp == 96:
+    target_exp_index = 8
+else:
+    raise ValueError("Invalid body_kp value")
+
+if wing_kp == 96:
+    target_exp_index = 12
+# inp_case = 3
 # base_path = "/NAS/spa176/pim/experiments/stand-stage-2/"
 base_path = "/NAS/spa176/papr-retarget/experiments/hummingbird-start-1/"
 # save_path = "/NAS/spa176/papr-retarget/experiments/hummingbird-ft-6-kp-nnwing5-nnbody250-wkpnn50-bkpnn256-regD/"
 # save_path = "/NAS/spa176/papr-retarget/experiments/hummingbird-ft-5-kp-nnwing5-nnbody190-wkpnn50-bkpnn192-regD-MSE/"
-save_path = "/NAS/spa176/papr-retarget/experiments/hummingbird-ft-7-kp-nnwing5-nnbody90-wkpnn50-bkpnn96-regD/"
+# save_path = f"/NAS/spa176/papr-retarget/experiments/hummingbird-ft-8-kp-nnwing5-nnbody{nn_body}-wkpnn50-bkpnn8-regD/"
+# save_path = f"/NAS/spa176/papr-retarget/experiments/hummingbird-ft-8-kp-nnwing5-nnbody{nn_body}-wkpnn50-bkpnn{kpnn_body}/"
+if reg_D:
+    save_path = f"/NAS/spa176/papr-retarget/experiments/hummingbird-ft-{target_exp_index}-kp-nnwing5-nnbody{nn_body}-wkpnn50-bkpnn{kpnn_body}-regD/"
+else:
+    if inp_case > 0:
+        save_path = f"/NAS/spa176/papr-retarget/experiments/hummingbird-ft-{target_exp_index}-kp-nnwing5-nnbody{nn_body}-wkpnn50-bkpnn{kpnn_body}-inp{inp_case}/"
+    else:
+        save_path = f"/NAS/spa176/papr-retarget/experiments/hummingbird-ft-{target_exp_index}-kp-nnwing5-nnbody{nn_body}-wkpnn50-bkpnn{kpnn_body}/"
+if force_smooth:
+    save_path = save_path[:-1] + "-smooth/"
+elif force_smooth_full:
+    save_path = save_path[:-1] + "-smooth-full/"
+if reg_boundary:
+    save_path = save_path[:-1] + "-RB/"
+# save_path = "/NAS/spa176/papr-retarget/experiments/hummingbird-ft-9-kp-nnwing5-nnbody250-wkpnn50-bkpnn256-regD/"
 # model_path = "/NAS/spa176/papr-retarget/experiments/hummingbird-start-1/model.pth"
-model_path = "/NAS/spa176/papr-retarget/experiments/hummingbird-ft-7-kp-nnwing5-nnbody90-wkpnn50-bkpnn96-regD/model.pth"
+model_path = "/NAS/spa176/papr-retarget/experiments/hummingbird-ft-9-kp-nnwing5-nnbody16-wkpnn50-bkpnn16/model.pth"
+# model_path = "/NAS/spa176/papr-retarget/experiments/hummingbird-ft-8-kp-nnwing5-nnbody90-wkpnn50-bkpnn8-regD/model.pth"
+# model_path = "/NAS/spa176/papr-retarget/experiments/hummingbird-ft-8-kp-nnwing5-nnbody24-wkpnn50-bkpnn8-regD/model.pth"
 # model_path = "/NAS/spa176/papr-retarget/experiments/hummingbird-ft-4-kp-nnwing5-nnbody15-wkpnn50-bkpnn96-w1000/model.pth"
 # model_path = "/NAS/spa176/papr-retarget/experiments/hummingbird-ft-5-kp-nnwing5-nnbody15-wkpnn50-bkpnn192-w1000/model.pth"
-exp_path = "/NAS/spa176/papr-retarget/fit_pointcloud_logs/multi_mlp_icp_shift_pe8_pointnet_densify_concat_fps/L1_fix_wing_kp_192_body_kp_96_kpnn_50_bodykpnn_96_cdw1000.0_rigidw1.0_nnwing5_nnbody90_kp_only_regD/"
+# exp_path = "/NAS/spa176/papr-retarget/fit_pointcloud_logs/multi_mlp_icp_shift_pe8_pointnet_densify_concat_fps/L1_fix_wing_kp_192_body_kp_96_kpnn_50_bodykpnn_96_cdw1000.0_rigidw1.0_nnwing5_nnbody90_kp_only_regD/"
+# exp_path = f"/NAS/spa176/papr-retarget/fit_pointcloud_logs/ot_wing192_body96/L1_fix_wing_kp_192_body_kp_96_kpnn_50_bodykpnn_8_cdw1.0_rigidw1.0_nnwing5_nnbody{nn_body}_kp_only_regD_p3dNorm/"
+# exp_path = f"/NAS/spa176/papr-retarget/fit_pointcloud_logs/ot_wing192_body96/L1_fix_wing_kp_192_body_kp_96_kpnn_50_bodykpnn_{kpnn_body}_cdw1.0_rigidw1.0_nnwing5_nnbody{nn_body}_kp_only_p3dNorm/"
+if reg_D:
+    exp_path = f"/NAS/spa176/papr-retarget/fit_pointcloud_logs/ot_wing{wing_kp}_body{body_kp}/L1_fix_wing_kp_192_body_kp_{body_kp}_kpnn_50_bodykpnn_{kpnn_body}_cdw1.0_rigidw1.0_nnwing5_nnbody{nn_body}_kp_only_regD_p3dNorm/"
+else:
+    if inp_case > 0:
+        exp_path = f"/NAS/spa176/papr-retarget/fit_pointcloud_logs/ot_wing{wing_kp}_body{body_kp}/L1_fix_wing_kp_192_body_kp_{body_kp}_kpnn_50_bodykpnn_{kpnn_body}_cdw1.0_rigidw1.0_nnwing5_nnbody{nn_body}_kp_only_p3dNorm_inp{inp_case}/"
+    else:
+        exp_path = f"/NAS/spa176/papr-retarget/fit_pointcloud_logs/ot_wing{wing_kp}_body{body_kp}/L1_fix_wing_kp_192_body_kp_{body_kp}_kpnn_50_bodykpnn_{kpnn_body}_cdw1.0_rigidw1.0_nnwing5_nnbody{nn_body}_kp_only_p3dNorm/"
+# if force_smooth:
+#     exp_path = exp_path[:-1] + "_smooth/"
+if reg_boundary:
+    exp_path = exp_path[:-1] + f"_RB/"
+    # exp_path = exp_path[:-1] + f"_RB{boundary_threshold}/"
 # exp_path = "/NAS/spa176/papr-retarget/fit_pointcloud_logs/multi_mlp_icp_shift_pe8_pointnet_densify_concat/L1_fix_wing_kp_192_body_kp_256_kpnn_50_bodykpnn_256_cdw1000.0_rigidw1.0_nnwing5_nnbody250_kp_only_regD/"
+if wing_kp == 96:
+    exp_path = f"/NAS/spa176/papr-retarget/fit_pointcloud_logs/ot_wingL{wing_kp}_wingR{wing_kp}_body{body_kp}/L1_fix_wing_kp_{wing_kp}_body_kp_{body_kp}_kpnn_50_bodykpnn_{kpnn_body}_cdw1.0_rigidw1.0_nnwing5_nnbody{nn_body}_kp_only_p3dNorm/"
 
 # create folder if not exists
 os.makedirs(save_path, exist_ok=True)
@@ -65,17 +131,32 @@ R = RTs.R
 T = RTs.T
 # deformed_pc = (torch.bmm(deformed_pc.unsqueeze(0), R) + T[:, None, :]).squeeze(0)
 
+if force_smooth:
+    deform_pc_name = "total_deformed_pc_smooth.pth"
+elif force_smooth_full:
+    if smooth_knn != 100:
+        deform_pc_name = f"total_deformed_pc_smooth_full_{smooth_knn}.pth"
+    else:
+        deform_pc_name = "total_deformed_pc_smooth_full.pth"
+else:
+    deform_pc_name = "total_deformed_pc.pth"
 # load the batch of deformed_pc
 total_deformed_pcs = torch.load(
-    os.path.join(exp_path, "total_deformed_pc.pth")
+    os.path.join(exp_path, deform_pc_name)
 )  # shape (T, N, 3)
 print("total_deformed_pcs shape", total_deformed_pcs.shape)
 # apply the transformation
 total_deformed_pcs = total_deformed_pcs * 10.0
 total_deformed_pcs = torch.bmm(total_deformed_pcs, R.expand(total_deformed_pcs.shape[0], 3, 3)) + T[:, None, :].expand(total_deformed_pcs.shape[0], -1, 3)
 
+if force_smooth:
+    save_pc_name = "total_deformed_pc_smooth.pth"
+elif force_smooth_full:
+    save_pc_name = f"total_deformed_pc_smooth_full_{smooth_knn}.pth"
+else:
+    save_pc_name = "total_deformed_pc_new.pth"
 # save the transformed deformed_pc
-torch.save(total_deformed_pcs, save_path + "total_deformed_pc_new.pth")
+torch.save(total_deformed_pcs, save_path + save_pc_name)
 deformed_pc = total_deformed_pcs[0]
 
 # # plot the deformed_pc in 3D
