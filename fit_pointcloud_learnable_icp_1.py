@@ -32,6 +32,7 @@ import plotly.graph_objects as go
 import open3d as o3d
 from pytorch3d.ops import estimate_pointcloud_normals
 from torch.nn import SmoothL1Loss
+from scipy.spatial import ConvexHull
 
 os.chdir("/NAS/spa176/papr-retarget")
 
@@ -590,14 +591,14 @@ def one_sided_chamfer_loss(src_transformed, nearest_tgt_points, loss_type="l2", 
     return loss
 
 
-def point_to_plane_loss(src_transformed, tgt_points, tgt_normals, nearest_indices):
+def point_to_plane_loss(src_transformed, tgt_points, tgt_normals, nearest_indices=None):
     # Gather the nearest target points using the nearest indices
-    nearest_tgt_points = tgt_points[nearest_indices]
-    nearest_tgt_normals = tgt_normals[nearest_indices]
+    # nearest_tgt_points = tgt_points[nearest_indices]
+    # nearest_tgt_normals = tgt_normals[nearest_indices]
 
     # Compute the L2 distances between each transformed source point and its nearest target point
     dists = torch.abs(
-       ((src_transformed - nearest_tgt_points) * nearest_tgt_normals).sum(dim=1)
+       ((src_transformed - tgt_points) * tgt_normals).sum(dim=1)
     )
 
     # Compute the mean distance as the loss
@@ -713,6 +714,106 @@ def LDA(all_pcs, smooth_knn=10):
         all_pcs[time_step] = avg_displacement + base_pc
 
 
+def linear_sum_correspondence(src_trans_np, tgt_np, cur_tgt_normals, use_cos=False, alpha=0.75):
+    # Estimate surface normals for source and target key points
+    cur_src_normals = estimate_normals_pytorch3d(src_trans_np)
+    # Compute the Euclidean distance matrix
+    euclidean_cost_matrix = np.linalg.norm(
+        src_trans_np[:, np.newaxis, :] - tgt_np[np.newaxis, :, :],
+        axis=2,
+    )
+
+    # Compute the feature distance matrix (e.g., Euclidean distance between normals)
+    if use_cos:
+        src_norms = np.linalg.norm(cur_src_normals, axis=1)
+        tgt_norms = np.linalg.norm(cur_tgt_normals, axis=1)
+        dot_products = np.einsum('ik,jk->ij', cur_src_normals, cur_tgt_normals)
+        norms_product = np.outer(src_norms, tgt_norms)
+        cos_similarity = dot_products / (norms_product + 1e-8)
+        feature_cost_matrix = 1.0 - cos_similarity
+
+        cost_matrix = euclidean_cost_matrix * (1 + feature_cost_matrix)
+    else:
+        feature_cost_matrix = np.linalg.norm(
+            cur_src_normals[:, np.newaxis, :] - cur_tgt_normals[np.newaxis, :, :],
+            axis=2,
+        )
+        # Combine the two matrices to form the final cost matrix
+        # alpha = 0.75  # Weighting factor for combining the distances
+        # alpha = 0.5  # Weighting factor for combining the distances
+        cost_matrix = alpha * euclidean_cost_matrix + (1 - alpha) * feature_cost_matrix
+    row_ind, col_ind = linear_sum_assignment(cost_matrix)
+    mapping = list(zip(row_ind, col_ind))
+
+    new_tgt_kp = np.zeros_like(tgt_np)
+    new_tgt_normals = np.zeros_like(cur_tgt_normals)
+    # final_ori_tgt_kp = np.zeros_like(cur_src_kp)
+    for src_idx, tgt_idx in mapping:
+        new_tgt_kp[src_idx] = tgt_np[tgt_idx]
+        new_tgt_normals[src_idx] = cur_tgt_normals[tgt_idx]
+        # final_ori_tgt_kp[src_idx] = ori_tgt_kp[tgt_idx]
+    return new_tgt_kp, new_tgt_normals
+
+
+def estimate_volume(point_cloud):
+    """
+    Estimate the volume of a convex shape represented by a point cloud.
+
+    :param point_cloud: numpy array of shape (N, 3), where N is the number of points.
+    :return: Volume of the convex hull.
+    """
+    hull = ConvexHull(point_cloud)
+    return hull.volume
+
+
+def find_wing_anchor_point_torch(child_pts, parent_pts, k=5):
+    """
+    Finds an 'anchor' point (joint location) in the wing point cloud
+    by identifying which points lie closest to the body. Then returns
+    the centroid of the top k closest wing points.
+
+    Args:
+        child_pts: (N, 3) torch.FloatTensor of 3D coordinates for the wing
+        parent_pts: (M, 3) torch.FloatTensor of 3D coordinates for the body
+        k: Number of nearest wing points (to the body) to average if you
+           want a centroid.
+
+    Returns:
+        anchor_point: (3,) torch.FloatTensor representing the anchor location in the wing
+    """
+
+    # Ensure inputs are the correct shape
+    # (N, 3) for child_pts, (M, 3) for parent_pts
+    # Optionally, you can add checks or assertions here.
+
+    # 1) Compute the distance of each wing point to every body point (naive approach).
+    #    For large point clouds, consider more efficient methods (KD-Tree / nearest neighbor searches).
+    #    distances will be shape (N, M).
+    distances = torch.norm(
+        child_pts.unsqueeze(1) - parent_pts.unsqueeze(0),
+        dim=2
+    )  # (N, M)
+
+    # 2) For each wing point, find its minimal distance to any body point.
+    #    This effectively measures how close that wing point is to the body.
+    #    min_dist_to_body will be (N,) containing the minimal distance for each of the N wing points.
+    min_dist_to_body, _ = torch.min(distances, dim=1)  # shape (N,)
+
+    # 3) Identify the 'k' wing points that are closest to the body.
+    #    We sort the distances to find the top k.
+    #    The result of argsort is a (N,) array of indices.
+    #    Then we take the first k to get the k closest.
+    closest_indices = torch.argsort(min_dist_to_body)[:k]
+
+    # The boundary region is the set of these k closest wing points.
+    boundary_region = child_pts[closest_indices]
+
+    # 4) The anchor point can be the centroid (average) of these boundary points.
+    anchor_point = boundary_region.mean(dim=0)  # shape (3,)
+
+    return anchor_point
+
+
 def modified_icp_with_nn(
     src,
     tgt,
@@ -739,13 +840,26 @@ def modified_icp_with_nn(
     c_schedule=None,
     add_lda=False,
     lda_weight=1.0,
+    early_stop=False,
+    stop_volume_ratio=0.8,
+    loss_modes=[],
+    hierarchical_transformation=False,
+    joint_pos=[],
 ):
     if part_max_freqs is not None:
         save_path = os.path.join(log_dir, f"pe{model.max_freq}_p0f{part_max_freqs[0]}_p1f{part_max_freqs[1]}_temp{model.temperature}_seg{num_segments}_iter{iterations}/")
     else:
         save_path = os.path.join(log_dir, f"pe{model.max_freq}_temp{model.temperature}_seg{num_segments}_iter{iterations}/")
-    if loss_mode == "pt2plane":
-        save_path = save_path[:-1] + "_plane/"
+    if len(loss_modes):
+        save_path = save_path[:-1] + "_"
+        for lm in loss_modes:
+            if lm == "pt2plane":
+                save_path += f"p_"
+            elif lm == "chamfer":
+                save_path += f"c_"
+    else:
+        if loss_mode == "pt2plane":
+            save_path = save_path[:-1] + "_plane/"
     if isinstance(tgt, list):
         save_path = save_path[:-1] + "_partmatch/"
     if loss_type != "l2":
@@ -770,6 +884,8 @@ def modified_icp_with_nn(
         save_path = save_path[:-1] + f"_avgL/"
     if add_lda:
         save_path = save_path[:-1] + f"_lda{lda_weight}/"
+    if hierarchical_transformation:
+        save_path = save_path[:-1] + f"_hier/"
     os.makedirs(save_path, exist_ok=True)
     if checkpoint is not None:
         model.load_state_dict(torch.load(checkpoint))
@@ -794,6 +910,15 @@ def modified_icp_with_nn(
 
     match_frames = []
 
+    if early_stop:
+        init_volumes = [estimate_volume(src[i].cpu().numpy()) for i in range(len(src))]
+        # cur_volumes = []
+        stops = [False for i in range(len(src))]
+        stop_tgt_normal_shuffled = [None for i in range(len(src))]
+
+    stop_tgt_nn = [None for i in range(len(src))]
+    stop = True
+
     segment_length = iterations // num_segments
     cur_seg_idx = 0
     cur_c_seg_idx = 0
@@ -804,7 +929,7 @@ def modified_icp_with_nn(
         for i in range(len(tgt)):
             tgt_normals.append(estimate_normals_pytorch3d(tgt[i].cpu().numpy()))
 
-    if loss_mode == "pt2plane":
+    if loss_mode == "pt2plane" and correspondence == "nn":
         tgt_normals = torch.tensor(estimate_normals_pytorch3d(tgt.cpu().numpy(), knn=30), dtype=torch.float32, device=device)
     for it in tqdm.tqdm(range(iterations), desc="ICP Iterations"):
         # mask_ratio = 1.0 if mask_ratio_schedule is None else mask_ratio_schedule[it]
@@ -828,8 +953,11 @@ def modified_icp_with_nn(
             src_transformed = []
             # nearest_indices = []
             tgt_nn = []
+            tgt_normal_shuffled = []
             total_arap_loss = 0.
             loss = 0.
+            root_R = None
+            root_t = None
             for i in range(len(part_max_freqs)):
 
                 mask_ratio = min((segment_index + 1) * 1.0 / num_segments, part_max_freqs[i] * 1.0 / model.max_freq)
@@ -841,11 +969,21 @@ def modified_icp_with_nn(
                 # Convert axis-angle to rotation matrix
                 R = axis_angle_to_rotation_matrix(axis_angle)
 
+                if hierarchical_transformation and i == 0:
+                    # root_R would be the mean of the R
+                    root_R = R.mean(dim=0)
+                    root_t = translation.mean(dim=0)
+
                 # Apply transformations
                 cur_src_transformed = []
                 for j in range(src[i].shape[0]):
-                    rotated = torch.matmul(R[j], src[i][j])
-                    cur_src_transformed.append(rotated + translation[j])
+                    if hierarchical_transformation and i > 0:
+                        # normalize the point coordinate by the joint position
+                        rotated = torch.matmul(R[j], src[i][j] - joint_pos[i])
+                        cur_src_transformed.append(torch.matmul(root_R, rotated + translation[j] + joint_pos[i]) + root_t)
+                    else:
+                        rotated = torch.matmul(R[j], src[i][j])
+                        cur_src_transformed.append(rotated + translation[j])
                 src_transformed.append(torch.stack(cur_src_transformed, dim=0))
 
                 if use_arap and not joint_arap:
@@ -868,54 +1006,49 @@ def modified_icp_with_nn(
                     else:
                         tgt_nn.append(tgt[cur_nearest_indices])
                 elif correspondence == "linear_sum":
-                    # Estimate surface normals for source and target key points
-                    cur_src_normals = estimate_normals_pytorch3d(src_trans_np)
-                    cur_tgt_normals = tgt_normals[i]
-
-                    # Compute the Euclidean distance matrix
-                    euclidean_cost_matrix = np.linalg.norm(
-                        src_trans_np[:, np.newaxis, :] - tgt_np[np.newaxis, :, :],
-                        axis=2,
-                    )
-
-                    # Compute the feature distance matrix (e.g., Euclidean distance between normals)
-                    if USE_COS:
-                        src_norms = np.linalg.norm(cur_src_normals, axis=1)
-                        tgt_norms = np.linalg.norm(cur_tgt_normals, axis=1)
-                        dot_products = np.einsum('ik,jk->ij', cur_src_normals, cur_tgt_normals)
-                        norms_product = np.outer(src_norms, tgt_norms)
-                        cos_similarity = dot_products / (norms_product + 1e-8)
-                        feature_cost_matrix = 1.0 - cos_similarity
-
-                        cost_matrix = euclidean_cost_matrix * (1 + feature_cost_matrix)
+                    new_tgt_kp, new_tgt_normal = linear_sum_correspondence(src_trans_np, tgt_np, tgt_normals[i], use_cos=False, alpha=0.75)
+                    
+                    if early_stop and not stops[i]:
+                        cur_volume = estimate_volume(src_trans_np)
+                        # NOTE: temporarily only check the first part
+                        if i == 0 and cur_volume / init_volumes[i] < stop_volume_ratio:
+                            stops[i] = True
+                            stop_tgt_nn[i] = torch.from_numpy(new_tgt_kp).float().to(device)
+                            stop_tgt_normal_shuffled[i] = torch.from_numpy(new_tgt_normal).float().to(device)
+                        
+                    if stop_tgt_nn[i] is not None:
+                        tgt_nn.append(stop_tgt_nn[i])
+                        tgt_normal_shuffled.append(stop_tgt_normal_shuffled[i])
                     else:
-                        feature_cost_matrix = np.linalg.norm(
-                            cur_src_normals[:, np.newaxis, :] - cur_tgt_normals[np.newaxis, :, :],
-                            axis=2,
-                        )
+                        tgt_nn.append(torch.from_numpy(new_tgt_kp).float().to(device))
+                        tgt_normal_shuffled.append(torch.from_numpy(new_tgt_normal).float().to(device))
 
-                        # Combine the two matrices to form the final cost matrix
-                        alpha = 0.75  # Weighting factor for combining the distances
-                        # alpha = 0.5  # Weighting factor for combining the distances
-                        cost_matrix = alpha * euclidean_cost_matrix + (1 - alpha) * feature_cost_matrix
-                    row_ind, col_ind = linear_sum_assignment(cost_matrix)
-                    mapping = list(zip(row_ind, col_ind))
+                    if len(loss_modes):
+                        if loss_modes[i] == "chamfer":
+                            loss += one_sided_chamfer_loss(src_transformed[i], tgt_nn[i], loss_type=loss_type, c=cur_c)
+                        elif loss_modes[i] == "pt2plane":
+                            loss += point_to_plane_loss(
+                                src_transformed[i], tgt_nn[i], tgt_normal_shuffled[i]
+                            )
 
-                    new_tgt_kp = np.zeros_like(tgt_np)
-                    # final_ori_tgt_kp = np.zeros_like(cur_src_kp)
-                    for src_idx, tgt_idx in mapping:
-                        new_tgt_kp[src_idx] = tgt_np[tgt_idx]
-                        # final_ori_tgt_kp[src_idx] = ori_tgt_kp[tgt_idx]
-                    tgt_nn.append(torch.from_numpy(new_tgt_kp).float().to(device))
-
-                    if avg_loss and not joint_arap:
-                        loss += one_sided_chamfer_loss(src_transformed[i], tgt_nn[i], loss_type=loss_type, nn_indices=arap_losses[i].nn_indices, c=cur_c)
-
+                    if avg_loss and not joint_arap and not stops[i]:
+                        if loss_mode == "chamfer":
+                            loss += one_sided_chamfer_loss(src_transformed[i], tgt_nn[i], loss_type=loss_type, nn_indices=arap_losses[i].nn_indices, c=cur_c)
+                        elif loss_mode == "pt2plane":
+                            loss += point_to_plane_loss(
+                                src_transformed[i], tgt_nn[i], tgt_normal_shuffled[i]
+                            )
                 else:
                     raise ValueError("correspondence must be either 'nn' or 'linear_sum'")
 
+                # if early_stop and i == 0:
+                #     cur_volume = estimate_volume(src_trans_np)
+                #     if cur_volume / init_volumes[i] < stop_volume_ratio:
+                #         stop = True
+
             src_transformed = torch.cat(src_transformed, dim=0)
             tgt_nn = torch.cat(tgt_nn, dim=0)
+            tgt_normal_shuffled = torch.cat(tgt_normal_shuffled, dim=0)
         else:
             mask_ratio = (segment_index + 1) * 1.0 / num_segments
 
@@ -942,13 +1075,14 @@ def modified_icp_with_nn(
             nearest_indices = nearest_indices.flatten()
             tgt_nn = tgt[nearest_indices]
         # Compute loss and backprop if doing a learnable approach
-        if loss_mode == "chamfer" and not avg_loss:
-            # loss = one_sided_chamfer_loss(src_transformed, tgt, nearest_indices)
-            loss = one_sided_chamfer_loss(src_transformed, tgt_nn, loss_type=loss_type, c=cur_c)
-        elif loss_mode == "pt2plane":
-            loss = point_to_plane_loss(
-                src_transformed, tgt, tgt_normals, nearest_indices
-            )
+        if len(loss_modes) == 0: 
+            if loss_mode == "chamfer" and not avg_loss:
+                # loss = one_sided_chamfer_loss(src_transformed, tgt, nearest_indices)
+                loss = one_sided_chamfer_loss(src_transformed, tgt_nn, loss_type=loss_type, c=cur_c)
+            elif loss_mode == "pt2plane":
+                loss = point_to_plane_loss(
+                    src_transformed, tgt_nn, tgt_normal_shuffled
+                )
         # else:
         #     raise ValueError("loss_mode must be either 'chamfer' or 'pt2plane'")
 
@@ -965,11 +1099,18 @@ def modified_icp_with_nn(
         loss.backward()
         optimizer.step()
 
-        # Print loss value
-        tqdm.tqdm.write(f"Iteration {it} Loss ({loss_mode}): {loss.item():.6f}, ARAP Loss: {total_arap_loss:.6f}")
+        if early_stop:
+            tqdm.tqdm.write(f"Iteration {it} Loss ({loss_mode}): {loss.item():.6f}, ARAP Loss: {total_arap_loss:.6f} Volume ratio: {(cur_volume / init_volumes[0]):.6f}")
+        else:
+            # Print loss value
+            tqdm.tqdm.write(f"Iteration {it} Loss ({loss_mode}): {loss.item():.6f}, ARAP Loss: {total_arap_loss:.6f}")
+
+        if early_stop:
+            for cur_stop in stops:
+                stop = stop and cur_stop
 
         # Save the transformed point cloud
-        if it % 10 == 0 or it == iterations - 1:
+        if it % 10 == 0 or it == iterations - 1 or (stop and early_stop):
             plot_pointcloud(
                 src_transformed, save_path, title=f"Transformed Point Cloud Iter {it}",
                 # extra_points=tgt, plot_match=False
@@ -981,20 +1122,316 @@ def modified_icp_with_nn(
                     extra_points=tgt_nn, plot_match=True
                 )
                 match_frames.append(cur_frame)
-                if it % 100 == 0:
+                if it % 100 == 0 or (stop and early_stop):
                     imageio.mimsave(os.path.join(save_path, "match_frames.mp4"), match_frames, fps=10)
+                    torch.save(model.state_dict(), os.path.join(save_path, f"deform_model_{it}.pth"))
+        if stop and early_stop:
+            break
+        else:
+            stop = True
     if plot_match:
         imageio.mimsave(os.path.join(save_path, "match_frames.mp4"), match_frames, fps=10)
         # save model weights
-        torch.save(model.state_dict(), os.path.join(save_path, f"deform_model.pth"))
+        torch.save(model.state_dict(), os.path.join(save_path, f"deform_model_final.pth"))
 
     return model, src_transformed.detach().cpu().numpy()
 
 
+def modified_icp(
+    src,
+    tgt,
+    transformations,
+    log_dir,
+    iterations=1e3,
+    num_segments=1,
+    # mask_ratio_schedule=None,
+    loss_mode="chamfer",
+    part_max_freqs=None,
+    checkpoint=None,
+    plot_match=False,
+    loss_type="l2",
+    correspondence="nn",
+    lrt=1e-3,
+    src_iter=0,
+    iter_schedule=None,
+    use_arap=False,
+    smooth_knn=10,
+    arap_w=1,
+    joint_arap=False,
+    avg_loss=False,
+    robust_c=0.2,
+    c_schedule=None,
+    add_lda=False,
+    lda_weight=1.0,
+    early_stop=False,
+    stop_volume_ratio=0.8,
+    loss_modes=[],
+    hierarchical_transformation=False,
+    joint_pos=[],
+    joint_k=1
+):
+    save_path = os.path.join(log_dir, f"rigid_cor_{correspondence}_iter{iterations}_jointK{joint_k}/")    
+    if len(loss_modes):
+        save_path = save_path[:-1] + "_"
+        for lm in loss_modes:
+            if lm == "pt2plane":
+                save_path += f"p_"
+            elif lm == "chamfer":
+                save_path += f"c_"
+    else:
+        if loss_mode == "pt2plane":
+            save_path = save_path[:-1] + "_plane/"
+    if loss_type != "l2":
+        if isinstance(robust_c, list):
+            save_path = save_path[:-1] + f"_{loss_type}_c{robust_c[0]}_{robust_c[1]}/"
+        elif robust_c != 0.2:
+            save_path = save_path[:-1] + f"_{loss_type}_c{robust_c}/"
+        else:
+            save_path = save_path[:-1] + f"_{loss_type}/"
+    if src_iter >= 0:
+        save_path = save_path[:-1] + f"_srciter{src_iter}/"
+    if use_arap:
+        if joint_arap:
+            save_path = save_path[:-1] + f"_joint_arap{arap_w}_k{smooth_knn}/"
+        else:
+            save_path = save_path[:-1] + f"_arap{arap_w}_k{smooth_knn}/"
+    # if avg_loss:
+    #     save_path = save_path[:-1] + f"_avgL/"
+    # if add_lda:
+    #     save_path = save_path[:-1] + f"_lda{lda_weight}/"
+    # if hierarchical_transformation:
+    #     save_path = save_path[:-1] + f"_hier/"
+    os.makedirs(save_path, exist_ok=True)
+    # if checkpoint is not None:
+    #     model.load_state_dict(torch.load(checkpoint))
+    # model.to(device)
+    # model.train()
+    optimizer = torch.optim.Adam(transformations, lr=lrt)
+    # source_points, target_points: np arrays of shape (N,3) or (M,3)
+    # src = torch.tensor(source_points, dtype=torch.float32, device=device)
+    # tgt = torch.tensor(target_points, dtype=torch.float32, device=device)
+    if isinstance(tgt, list):
+        plot_pointcloud(
+            torch.cat(tgt, dim=0), save_path, title=f"Target Point Cloud"
+        )
+        if use_arap and not joint_arap:
+            arap_losses = [ARAPLoss(src[i], smooth_knn=smooth_knn) for i in range(len(src))]
+        elif use_arap and joint_arap:
+            arap_loss = ARAPLoss(torch.cat(src, dim=0), smooth_knn=smooth_knn)
+    else:
+        plot_pointcloud(
+            tgt, save_path, title=f"Target Point Cloud"
+        )
+
+    match_frames = []
+
+    if early_stop:
+        init_volumes = [estimate_volume(src[i].cpu().numpy()) for i in range(len(src))]
+        # cur_volumes = []
+        stops = [False for i in range(len(src))]
+        stop_tgt_normal_shuffled = [None for i in range(len(src))]
+
+    stop_tgt_nn = [None for i in range(len(src))]
+    stop = True
+
+    segment_length = iterations // num_segments
+    cur_seg_idx = 0
+    cur_c_seg_idx = 0
+    cur_c = robust_c[cur_c_seg_idx] if isinstance(robust_c, list) else robust_c
+
+    if correspondence == "linear_sum":
+        tgt_normals = []
+        for i in range(len(tgt)):
+            tgt_normals.append(estimate_normals_pytorch3d(tgt[i].cpu().numpy()))
+
+    if loss_mode == "pt2plane" and correspondence == "nn":
+        tgt_normals = torch.tensor(estimate_normals_pytorch3d(tgt.cpu().numpy(), knn=30), dtype=torch.float32, device=device)
+    for it in tqdm.tqdm(range(iterations), desc="ICP Iterations"):
+        # if iter_schedule is not None:
+        #     if len(iter_schedule) and it >= iter_schedule[0]:
+        #         cur_seg_idx += 1
+        #         # pop the first element of iter_schedule
+        #         iter_schedule = iter_schedule[1:]
+        #         tqdm.tqdm.write(f"Increasing network frequency to index {cur_seg_idx}")
+        #     segment_index = cur_seg_idx
+        # else:
+        #     segment_index = it // segment_length
+        if c_schedule is not None:
+            if len(c_schedule) and it >= c_schedule[0]:
+                cur_c_seg_idx += 1
+                # pop the first element of iter_schedule
+                c_schedule = c_schedule[1:]
+                tqdm.tqdm.write(f"Upating robustness constant to index {cur_c_seg_idx}")
+            cur_c = robust_c[cur_c_seg_idx]
+        src_transformed = []
+        # nearest_indices = []
+        tgt_nn = []
+        tgt_normal_shuffled = []
+        total_arap_loss = 0.
+        loss = 0.
+        root_R = None
+        root_t = None
+        for i in range(len(src)):
+
+            # mask_ratio = min((segment_index + 1) * 1.0 / num_segments, part_max_freqs[i] * 1.0 / model.max_freq)
+
+            # params = model(src[i], mask_ratio=mask_ratio)  # (N, 6)
+            params = transformations[i]
+            rot_param = params[:6]
+            R = pytorch3d.transforms.rotation_6d_to_matrix(rot_param.unsqueeze(0)).squeeze(0)
+            translation = params[6:]
+
+            if i == 0:
+                # rotated = torch.matmul(R, src[i])
+                rotated = src[i] @ R.transpose(0,1)
+                src_transformed.append(rotated + translation)
+                root_R = R
+                root_t = translation
+            else:
+                # rotated = torch.matmul(R, src[i] - joint_pos[i])
+                rotated = src[i] @ R.transpose(0,1) - joint_pos[i]
+                # local_transformed = rotated + translation + joint_pos[i]
+                local_transformed = rotated + joint_pos[i]
+                # src_transformed.append(torch.matmul(root_R, local_transformed) + root_t)
+                src_transformed.append(local_transformed @ root_R.transpose(0,1) + root_t)
+
+
+            if use_arap and not joint_arap:
+                total_arap_loss += arap_losses[i](src_transformed[i], add_lda=add_lda, lda_weight=lda_weight)
+
+            # Find closest points (placeholder for nearest neighbor search)
+            src_trans_np = src_transformed[i].detach().cpu().numpy()
+            if isinstance(tgt, list):
+                tgt_np = tgt[i].detach().cpu().numpy()
+            else:
+                tgt_np = tgt.detach().cpu().numpy()
+
+            if correspondence == "nn":
+                tree = KDTree(tgt_np)
+                dists, cur_nearest_indices = tree.query(src_trans_np, k=1)
+                cur_nearest_indices = cur_nearest_indices.flatten()
+
+                if isinstance(tgt, list):
+                    tgt_nn.append(tgt[i][cur_nearest_indices])
+                else:
+                    tgt_nn.append(tgt[cur_nearest_indices])
+            elif correspondence == "linear_sum":
+                new_tgt_kp, new_tgt_normal = linear_sum_correspondence(src_trans_np, tgt_np, tgt_normals[i], use_cos=False, alpha=0.75)
+                
+                if early_stop and not stops[i]:
+                    cur_volume = estimate_volume(src_trans_np)
+                    # NOTE: temporarily only check the first part
+                    if i == 0 and cur_volume / init_volumes[i] < stop_volume_ratio:
+                        stops[i] = True
+                        stop_tgt_nn[i] = torch.from_numpy(new_tgt_kp).float().to(device)
+                        stop_tgt_normal_shuffled[i] = torch.from_numpy(new_tgt_normal).float().to(device)
+                    
+                if stop_tgt_nn[i] is not None:
+                    tgt_nn.append(stop_tgt_nn[i])
+                    tgt_normal_shuffled.append(stop_tgt_normal_shuffled[i])
+                else:
+                    tgt_nn.append(torch.from_numpy(new_tgt_kp).float().to(device))
+                    tgt_normal_shuffled.append(torch.from_numpy(new_tgt_normal).float().to(device))
+
+                if len(loss_modes):
+                    if loss_modes[i] == "chamfer":
+                        loss += one_sided_chamfer_loss(src_transformed[i], tgt_nn[i], loss_type=loss_type, c=cur_c)
+                    elif loss_modes[i] == "pt2plane":
+                        loss += point_to_plane_loss(
+                            src_transformed[i], tgt_nn[i], tgt_normal_shuffled[i]
+                        )
+
+                # if avg_loss and not joint_arap and not stops[i]:
+                #     if loss_mode == "chamfer":
+                #         loss += one_sided_chamfer_loss(src_transformed[i], tgt_nn[i], loss_type=loss_type, nn_indices=arap_losses[i].nn_indices, c=cur_c)
+                #     elif loss_mode == "pt2plane":
+                #         loss += point_to_plane_loss(
+                #             src_transformed[i], tgt_nn[i], tgt_normal_shuffled[i]
+                #         )
+            else:
+                raise ValueError("correspondence must be either 'nn' or 'linear_sum'")
+
+            # if early_stop and i == 0:
+            #     cur_volume = estimate_volume(src_trans_np)
+            #     if cur_volume / init_volumes[i] < stop_volume_ratio:
+            #         stop = True
+
+        src_transformed = torch.cat(src_transformed, dim=0)
+        tgt_nn = torch.cat(tgt_nn, dim=0)
+        if len(tgt_normal_shuffled) > 0:
+            # tgt_normal_shuffled = torch.zeros_like(src_transformed)
+            tgt_normal_shuffled = torch.cat(tgt_normal_shuffled, dim=0)
+        
+        # Compute loss and backprop if doing a learnable approach
+        if len(loss_modes) == 0: 
+            if loss_mode == "chamfer" and not avg_loss:
+                # loss = one_sided_chamfer_loss(src_transformed, tgt, nearest_indices)
+                loss = one_sided_chamfer_loss(src_transformed, tgt_nn, loss_type=loss_type, c=cur_c)
+            elif loss_mode == "pt2plane":
+                loss = point_to_plane_loss(
+                    src_transformed, tgt_nn, tgt_normal_shuffled
+                )
+        # else:
+        #     raise ValueError("loss_mode must be either 'chamfer' or 'pt2plane'")
+
+        if use_arap and joint_arap:
+            if avg_loss:
+                loss = one_sided_chamfer_loss(src_transformed, tgt_nn, loss_type=loss_type, nn_indices=arap_loss.nn_indices, c=cur_c)
+            total_arap_loss = arap_loss(src_transformed, add_lda=add_lda, lda_weight=lda_weight)
+
+        if use_arap:
+            loss += total_arap_loss * arap_w
+        # For example:
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        if early_stop:
+            tqdm.tqdm.write(f"Iteration {it} Loss ({loss_mode}): {loss.item():.6f}, ARAP Loss: {total_arap_loss:.6f} Volume ratio: {(cur_volume / init_volumes[0]):.6f}")
+        else:
+            # Print loss value
+            tqdm.tqdm.write(f"Iteration {it} Loss ({loss_mode}): {loss.item():.6f}, ARAP Loss: {total_arap_loss:.6f}")
+
+        if early_stop:
+            for cur_stop in stops:
+                stop = stop and cur_stop
+
+        # Save the transformed point cloud
+        if it % 10 == 0 or it == iterations - 1 or (stop and early_stop):
+            plot_pointcloud(
+                src_transformed, save_path, title=f"Transformed Point Cloud Iter {it}",
+                # extra_points=tgt, plot_match=False
+            )
+            if plot_match:
+                # plot a vector that connects each point to the corresponding nearest neighbor
+                cur_frame = plot_pointcloud(
+                    src_transformed, None, title=f"Match Iter {it}",
+                    extra_points=tgt_nn, plot_match=True
+                )
+                match_frames.append(cur_frame)
+                if it % 100 == 0 or (stop and early_stop):
+                    imageio.mimsave(os.path.join(save_path, "match_frames.mp4"), match_frames, fps=10)
+                    # torch.save(model.state_dict(), os.path.join(save_path, f"deform_model_{it}.pth"))
+                    # save the transformation parameters
+                    torch.save(transformations, os.path.join(save_path, f"transformation_{it}.pth"))
+        if stop and early_stop:
+            break
+        else:
+            stop = True
+    if plot_match:
+        imageio.mimsave(os.path.join(save_path, "match_frames.mp4"), match_frames, fps=10)
+        # save model weights
+        # torch.save(model.state_dict(), os.path.join(save_path, f"deform_model_final.pth"))
+        torch.save(transformations, os.path.join(save_path, f"transformation_final.pth"))
+
+    return transformations, src_transformed.detach().cpu().numpy()
+
+
+
 USE_ICP = True
 # USE_FPS = False
-TRAIN_ICP = False
-# TRAIN_ICP = True
+# TRAIN_ICP = False
+TRAIN_ICP = True
 USE_FPS = True
 DEFORM_KP_ONLY = True
 TRAIN_DEFORM_NET = True
@@ -1057,15 +1494,19 @@ if icp_instance:
     exp_dir += "_icp"
 if USE_COS:
     exp_dir += "_cos"
-log_dir = os.path.join(log_dir, exp_dir)
+
+exp_id = 2
+
+exp_sub_dir = f"exp_{exp_id}"
+log_dir = os.path.join(log_dir, exp_dir, exp_sub_dir)
 if not os.path.exists(log_dir):
     os.makedirs(log_dir, exist_ok=True)
-save_img_dir = os.path.join(log_dir, "images")
-if not os.path.exists(save_img_dir):
-    os.makedirs(save_img_dir, exist_ok=True)
+# save_img_dir = os.path.join(log_dir, "images")
+# if not os.path.exists(save_img_dir):
+#     os.makedirs(save_img_dir, exist_ok=True)
 
-# src_iter = 30000
-src_iter = 0
+src_iter = 30000
+# src_iter = 0
 # src_iter = 24000
 src_pc_path = f"/NAS/spa176/papr-retarget/point_clouds/butterfly/points_{src_iter}.npy"
 # src_pc_path = "/NAS/spa176/papr-retarget/point_clouds/butterfly/points_0.npy"
@@ -1095,8 +1536,8 @@ plot_pointcloud(src_pc, log_dir, title="Source Point Cloud")
 plot_pointcloud(tgt_pc, log_dir, title="Target Point Cloud")
 
 # icp_model = PointwiseTransformNet(base_channels=64, max_freq=0).to(device)
-# temperature = 50.0
-temperature = 25.0
+temperature = 50.0
+# temperature = 25.0
 max_freq = 1
 icp_model = PointwiseTransformNet(
     base_channels=64, max_freq=max_freq, temperature=temperature
@@ -1143,6 +1584,7 @@ tgt_part_indices = [
     bird_wing_indices[bird_wing_indices_right],
     bird_body_indices,
 ]
+use_hierarchical_transformation = True
 
 
 if USE_ICP:
@@ -1166,6 +1608,72 @@ if USE_ICP:
         tgt_kps.append(cur_tgt_kp.squeeze())
         # tgt_pcs.append(cur_tgt_pc.clone().cpu())
 
+    if use_hierarchical_transformation:
+        # find the joint position
+        joint_k = 1
+        joint_pos = [None]
+        for part_idx in range(1, 3, 1):
+            cur_joint_pos = find_wing_anchor_point_torch(
+                tgt_kps[part_idx], tgt_kps[0], k=joint_k
+            )
+            joint_pos.append(cur_joint_pos)
+            # if part_idx == 1:
+            #     # use plotly to visualize the joint position with tgt_kps[part_idx] and tgt_kps[0] also drawn in different colors
+            #     fig = go.Figure()
+            #     fig.add_trace(
+            #         go.Scatter3d(
+            #             x=tgt_kps[part_idx][:, 0].cpu().numpy(),
+            #             y=tgt_kps[part_idx][:, 1].cpu().numpy(),
+            #             z=tgt_kps[part_idx][:, 2].cpu().numpy(),
+            #             mode="markers",
+            #             marker=dict(
+            #                 size=2,
+            #                 color="red",
+            #             ),
+            #             name="Wing",
+            #         )
+            #     )
+            #     fig.add_trace(
+            #         go.Scatter3d(
+            #             x=tgt_kps[0][:, 0].cpu().numpy(),
+            #             y=tgt_kps[0][:, 1].cpu().numpy(),
+            #             z=tgt_kps[0][:, 2].cpu().numpy(),
+            #             mode="markers",
+            #             marker=dict(
+            #                 size=2,
+            #                 color="blue",
+            #             ),
+            #             name="Body",
+            #         )
+            #     )
+            #     fig.add_trace(
+            #         go.Scatter3d(
+            #             x=joint_pos[part_idx][0].cpu().numpy(),
+            #             y=joint_pos[part_idx][1].cpu().numpy(),
+            #             z=joint_pos[part_idx][2].cpu().numpy(),
+            #             mode="markers",
+            #             marker=dict(
+            #                 size=5,
+            #                 color="green",
+            #             ),
+            #             name="Joint",
+            #         )
+            #     )
+            #     fig.update_layout(
+            #         scene=dict(
+            #             xaxis_title="X",
+            #             yaxis_title="Y",
+            #             zaxis_title="Z",
+            #             aspectmode="cube",
+            #         ),
+            #         title="Joint Position",
+            #         width=800,
+            #         height=800,
+            #         margin=dict(l=0, r=0, b=0, t=0),
+            #     )
+            #     fig.show()
+            #     exit(0)
+
 
     if TRAIN_ICP:
         # # train icp model
@@ -1180,59 +1688,119 @@ if USE_ICP:
         #     loss_mode="chamfer",
         #     # loss_mode="pt2plane",
         # )
-        # train icp model
-        icp_model, src_transformed = modified_icp_with_nn(
+
+
+
+        # # train icp model
+        # icp_model, src_transformed = modified_icp_with_nn(
+        #     # [tgt_pc[bird_body_indices], tgt_pc[bird_wing_indices]],
+        #     # [src_pc[but_body_indices], src_pc[but_wing_indices]],
+        #     tgt_kps,
+        #     src_kps,
+        #     icp_model,
+        #     log_dir,
+        #     iterations=500,
+        #     # iterations=1000,
+        #     num_segments=max_freq,
+        #     # num_segments=1,
+        #     loss_mode="chamfer",
+        #     # loss_mode="pt2plane",
+        #     # part_max_freqs=[2, 5],
+        #     # part_max_freqs=[2, 2],
+        #     # part_max_freqs=[2, 2, 2],
+        #     # part_max_freqs=[5, 5, 5],
+        #     # part_max_freqs=[4, 4, 4],
+        #     # part_max_freqs=[2, max_freq, max_freq],
+        #     part_max_freqs=[max_freq, max_freq, max_freq],
+        #     # part_max_freqs=[1, 1],
+        #     # checkpoint="/NAS/spa176/papr-retarget/fit_pointcloud_logs/learnable_icp_wingL96_wingR96_body256/pe2_p0f2_p1f2_temp50.0_seg2_iter200_partmatch/deform_model.pth",
+        #     # checkpoint="/NAS/spa176/papr-retarget/fit_pointcloud_logs/learnable_icp_wingL96_wingR96_body3400/pe2_p0f2_p1f2_temp50.0_seg1_iter200_partmatch/deform_model.pth",
+        #     # checkpoint="/NAS/spa176/papr-retarget/fit_pointcloud_logs/learnable_icp_wingL96_wingR96_body0/pe2_p0f2_p1f2_temp25.0_seg2_iter200_partmatch/deform_model.pth",
+        #     # checkpoint="/NAS/spa176/papr-retarget/fit_pointcloud_logs/learnable_icp_wingL96_wingR96_body3400/pe2_p0f2_p1f2_temp25.0_seg1_iter200_partmatch/deform_model.pth",
+        #     # checkpoint="/NAS/spa176/papr-retarget/fit_pointcloud_logs/learnable_icp_wingL96_wingR96_body256/pe1_p0f1_p1f1_temp25.0_seg1_iter500_partmatch_kp_LS_joint_arap1_k90/deform_model.pth",
+        #     # checkpoint="/NAS/spa176/papr-retarget/fit_pointcloud_logs/learnable_icp_wingL96_wingR96_body256/pe1_p0f1_p1f1_temp25.0_seg1_iter200_partmatch_kp_LS_srciter12000_joint_arap1_k90/deform_model.pth",
+        #     # checkpoint="/NAS/spa176/papr-retarget/fit_pointcloud_logs/learnable_icp_wingL96_wingR96_body256/pe1_p0f1_p1f1_temp25.0_seg1_iter1000_partmatch_kp_LS_srciter0_joint_arap10_k10/deform_model.pth",
+        #     # checkpoint="/NAS/spa176/papr-retarget/fit_pointcloud_logs/learnable_icp_wingL96_wingR96_body256/pe1_p0f1_p1f1_temp25.0_seg1_iter1000_partmatch_kp_LS_srciter0_joint_arap30_k10/deform_model.pth",
+        #     # checkpoint="/NAS/spa176/papr-retarget/fit_pointcloud_logs/learnable_icp_wingL96_wingR96_body256/pe1_p0f1_p1f1_temp25.0_seg1_iter500_partmatch_kp_LS_srciter12000_joint_arap30_k10/deform_model.pth",
+        #     plot_match=True,
+        #     # loss_type="hubert",
+        #     # loss_type="geman",
+        #     # loss_type="p2p"
+        #     correspondence="linear_sum",
+        #     lrt=2.5e-3,
+        #     src_iter=src_iter,
+        #     use_arap=True,
+        #     smooth_knn=10,
+        #     arap_w=10,
+        #     joint_arap=True,
+        #     # iter_schedule=[100],
+        #     # avg_loss=True,
+        #     # robust_c=0.05,
+        #     # robust_c=[1.0, 0.05, 0.01],
+        #     # c_schedule=[300, 600],
+        #     # add_lda=True,
+        #     # lda_weight=0.025,
+        #     # early_stop=True,
+        #     stop_volume_ratio=0.97,
+        #     # loss_modes=["chamfer", "pt2plane", "pt2plane"],
+        #     hierarchical_transformation=use_hierarchical_transformation,
+        #     joint_pos=joint_pos,
+        # )
+
+        # initialize the transformation parameters, each with 9 dimentional vector initialized to 0
+        transformations = torch.nn.ParameterList(
+            [
+                torch.nn.Parameter(torch.tensor([1., 0., 0., 0., 1., 0., 0., 0., 0.], dtype=torch.float32).to(device))
+                for _ in range(len(src_kps))
+            ]
+        )
+
+
+        icp_model, src_transformed = modified_icp(
             # [tgt_pc[bird_body_indices], tgt_pc[bird_wing_indices]],
             # [src_pc[but_body_indices], src_pc[but_wing_indices]],
             tgt_kps,
             src_kps,
-            icp_model,
+            transformations,
             log_dir,
-            # iterations=500,
-            iterations=1000,
+            iterations=600,
+            # iterations=1000,
             num_segments=max_freq,
             # num_segments=1,
             loss_mode="chamfer",
-            # loss_mode="pt2plane",
-            # part_max_freqs=[2, 5],
-            # part_max_freqs=[2, 2],
-            # part_max_freqs=[2, 2, 2],
-            # part_max_freqs=[5, 5, 5],
-            # part_max_freqs=[4, 4, 4],
-            # part_max_freqs=[2, max_freq, max_freq],
             part_max_freqs=[max_freq, max_freq, max_freq],
-            # part_max_freqs=[1, 1],
-            # checkpoint="/NAS/spa176/papr-retarget/fit_pointcloud_logs/learnable_icp_wingL96_wingR96_body256/pe2_p0f2_p1f2_temp50.0_seg2_iter200_partmatch/deform_model.pth",
-            # checkpoint="/NAS/spa176/papr-retarget/fit_pointcloud_logs/learnable_icp_wingL96_wingR96_body3400/pe2_p0f2_p1f2_temp50.0_seg1_iter200_partmatch/deform_model.pth",
-            # checkpoint="/NAS/spa176/papr-retarget/fit_pointcloud_logs/learnable_icp_wingL96_wingR96_body0/pe2_p0f2_p1f2_temp25.0_seg2_iter200_partmatch/deform_model.pth",
-            # checkpoint="/NAS/spa176/papr-retarget/fit_pointcloud_logs/learnable_icp_wingL96_wingR96_body3400/pe2_p0f2_p1f2_temp25.0_seg1_iter200_partmatch/deform_model.pth",
-            # checkpoint="/NAS/spa176/papr-retarget/fit_pointcloud_logs/learnable_icp_wingL96_wingR96_body256/pe1_p0f1_p1f1_temp25.0_seg1_iter500_partmatch_kp_LS_joint_arap1_k90/deform_model.pth",
-            # checkpoint="/NAS/spa176/papr-retarget/fit_pointcloud_logs/learnable_icp_wingL96_wingR96_body256/pe1_p0f1_p1f1_temp25.0_seg1_iter200_partmatch_kp_LS_srciter12000_joint_arap1_k90/deform_model.pth",
-            # checkpoint="/NAS/spa176/papr-retarget/fit_pointcloud_logs/learnable_icp_wingL96_wingR96_body256/pe1_p0f1_p1f1_temp25.0_seg1_iter1000_partmatch_kp_LS_srciter0_joint_arap10_k10/deform_model.pth",
-            # checkpoint="/NAS/spa176/papr-retarget/fit_pointcloud_logs/learnable_icp_wingL96_wingR96_body256/pe1_p0f1_p1f1_temp25.0_seg1_iter1000_partmatch_kp_LS_srciter0_joint_arap30_k10/deform_model.pth",
-            # checkpoint="/NAS/spa176/papr-retarget/fit_pointcloud_logs/learnable_icp_wingL96_wingR96_body256/pe1_p0f1_p1f1_temp25.0_seg1_iter500_partmatch_kp_LS_srciter12000_joint_arap30_k10/deform_model.pth",
             plot_match=True,
             # loss_type="hubert",
             # loss_type="geman",
+            # loss_type="p2p"
             correspondence="linear_sum",
-            lrt=2.5e-3,
+            # lrt=2.5e-3,
             src_iter=src_iter,
             use_arap=True,
-            smooth_knn=40,
-            arap_w=10,
+            smooth_knn=10,
+            arap_w=20,
             joint_arap=True,
             # iter_schedule=[100],
             # avg_loss=True,
             # robust_c=0.05,
             # robust_c=[1.0, 0.05, 0.01],
             # c_schedule=[300, 600],
-            add_lda=True,
-            lda_weight=0.025,
+            # add_lda=True,
+            # lda_weight=0.025,
+            # early_stop=True,
+            stop_volume_ratio=0.97,
+            # loss_modes=["chamfer", "pt2plane", "pt2plane"],
+            # hierarchical_transformation=use_hierarchical_transformation,
+            joint_pos=joint_pos,
+            joint_k=joint_k
         )
+
+
         exit(0)
     else:
         # checkpoint = "/NAS/spa176/papr-retarget/fit_pointcloud_logs/learnable_icp_wingL96_wingR96_body256/pe2_p0f2_p1f2_temp50.0_seg2_iter200_partmatch/deform_model.pth"
-        checkpoint = "/NAS/spa176/papr-retarget/fit_pointcloud_logs/learnable_icp_wingL96_wingR96_body256/pe1_p0f1_p1f1_temp25.0_seg1_iter1000_partmatch_kp_LS_srciter0_joint_arap30_k10/deform_model.pth"
+        # checkpoint = "/NAS/spa176/papr-retarget/fit_pointcloud_logs/learnable_icp_wingL96_wingR96_body256/pe1_p0f1_p1f1_temp25.0_seg1_iter1000_partmatch_kp_LS_srciter0_joint_arap30_k10/deform_model.pth"
+        checkpoint = "/NAS/spa176/papr-retarget/fit_pointcloud_logs/learnable_icp_wingL96_wingR96_body256/exp_1/pe5_p0f5_p1f5_temp50.0_seg5_iter500_partmatch_kp_LS_srciter0_joint_arap10_k40/deform_model_final.pth"
         icp_model.load_state_dict(torch.load(checkpoint))
         icp_model.eval()
 
@@ -1278,31 +1846,6 @@ tgt_kps = []
 tgt_pcs = []
 boundary_indices = []
 ori_tgt_kps = []
-
-
-# find the boundary points
-def find_boundary_points(part1, part2, threshold=0.05):
-    # Convert tensors to numpy arrays for distance computation
-    part1_np = part1.cpu().numpy()
-    part2_np = part2.cpu().numpy()
-
-    # Create KD-Trees for efficient nearest neighbor search
-    tree1 = cKDTree(part1_np)
-    tree2 = cKDTree(part2_np)
-
-    # Find points in part1 that are close to any point in part2
-    dists1, indices1 = tree1.query(part2_np, distance_upper_bound=threshold)
-    boundary_points1 = part1_np[indices1[dists1 < threshold]]
-
-    # Find points in part2 that are close to any point in part1
-    dists2, indices2 = tree2.query(part1_np, distance_upper_bound=threshold)
-    boundary_points2 = part2_np[indices2[dists2 < threshold]]
-
-    # Convert boundary points back to tensors
-    boundary_points1_indices = indices1[dists1 < threshold]
-    boundary_points2_indices = indices2[dists2 < threshold]
-
-    return boundary_points1_indices, boundary_points2_indices
 
 
 if TRAIN_DEFORM_NET:
@@ -1840,8 +2383,8 @@ if REG_DEFORM_NET:
 
     pytorch3d_est_normal = True
 
-    test_transform_net = True
-    # test_transform_net = False
+    # test_transform_net = True
+    test_transform_net = False
 
     # force_smooth = True
     force_smooth = False
@@ -2005,32 +2548,32 @@ if REG_DEFORM_NET:
             # parameterize the src point cloud
             # pred_src_pcs, src_pc_weights, src_nn_inds = parametertize_pc(src_pcs[part_idx], init_kps[part_idx][0], kp_knn, step=12000)
             # parameterize the deformed point cloud
-            cur_kp_knn = all_kp_knn[part_idx]
-            pred_deformed_pc, deformed_pc_weight, deformed_nn_ind = parametertize_pc(
-                tgt_pcs[part_idx].to(device),
-                tgt_kps[part_idx].to(device),
-                cur_kp_knn,
-                step=35000,
-            )
-            pred_deformed_pcs.append(pred_deformed_pc)
-            deformed_pc_weights.append(deformed_pc_weight.to(device))
-            deformed_nn_inds.append(deformed_nn_ind)
-            # deformed_nn_inds = deformed_nn_inds.to(device)
-            # deformed_pc_weights = deformed_pc_weights.to(device)
-
-            # calculate the surface normals at each src_pcs[i] and store the rotation
-            # normal_rotation_matrices = compute_rotation_matrices_for_batch(
-            #     src_pcs[sample_steps], num_nn, flip_normal=flip_normal
+            # cur_kp_knn = all_kp_knn[part_idx]
+            # pred_deformed_pc, deformed_pc_weight, deformed_nn_ind = parametertize_pc(
+            #     tgt_pcs[part_idx].to(device),
+            #     tgt_kps[part_idx].to(device),
+            #     cur_kp_knn,
+            #     step=35000,
             # )
-            # deformed_kps = torch.matmul(
-            #     normal_rotation_matrices[:, kp_indices[0], :, :],
-            #     init_displacement[:, kp_indices[0], :].detach().cpu().expand(len(sample_steps), -1, -1).unsqueeze(-1),
-            # ).squeeze(-1) + key_points[sample_steps]
-            pc_img = plot_pointcloud(
-                pred_deformed_pc,
-                cur_log_dir,
-                title=f"Pred PC Part {part_idx}",
-            )
+            # pred_deformed_pcs.append(pred_deformed_pc)
+            # deformed_pc_weights.append(deformed_pc_weight.to(device))
+            # deformed_nn_inds.append(deformed_nn_ind)
+            # # deformed_nn_inds = deformed_nn_inds.to(device)
+            # # deformed_pc_weights = deformed_pc_weights.to(device)
+
+            # # calculate the surface normals at each src_pcs[i] and store the rotation
+            # # normal_rotation_matrices = compute_rotation_matrices_for_batch(
+            # #     src_pcs[sample_steps], num_nn, flip_normal=flip_normal
+            # # )
+            # # deformed_kps = torch.matmul(
+            # #     normal_rotation_matrices[:, kp_indices[0], :, :],
+            # #     init_displacement[:, kp_indices[0], :].detach().cpu().expand(len(sample_steps), -1, -1).unsqueeze(-1),
+            # # ).squeeze(-1) + key_points[sample_steps]
+            # pc_img = plot_pointcloud(
+            #     pred_deformed_pc,
+            #     cur_log_dir,
+            #     title=f"Pred PC Part {part_idx}",
+            # )
 
             normal_rotation_matrices, pred_normal = (
                 compute_rotation_matrices_for_batch(
@@ -2180,7 +2723,7 @@ if REG_DEFORM_NET:
                     no_scale=no_scale,
                 ) + base_pc.to(device)
                 # deformed_src_pcs = vis_base_displacement.to(device) + pc_inp.to(device)
-                if use_keypoints:
+                if use_keypoints and not regularize_kp_only:
                     deformed_pcs = []
                     for deformed_kp in deformed_src_pcs:
                         deformed_pcs.append(
@@ -2191,6 +2734,8 @@ if REG_DEFORM_NET:
                             )
                         )
                     total_deformed_pc.append(torch.stack(deformed_pcs, dim=0))
+                elif regularize_kp_only:
+                    total_deformed_pc.append(deformed_src_pcs)
             total_deformed_pc = torch.cat(total_deformed_pc, dim=1)
             pc_img = plot_pointcloud(
                 total_deformed_pc,
@@ -2763,7 +3308,7 @@ if REG_DEFORM_NET:
             imageio.mimsave(
                 os.path.join(cur_log_dir, "train_deformed_pc.mp4"), pc_images, fps=10
             )
-            save_all_deformed_pcs()
+            # save_all_deformed_pcs()
             save_deformed_kps()
             if i >= 100:
                 visualize_kps(cur_log_dir, num_steps)

@@ -348,6 +348,8 @@ shift_kp = False
 icp_instance = False
 learnable_icp = True
 
+exp_id = 1
+
 # reg_boundary = True
 reg_boundary = False
 boundary_threshold = 0.05
@@ -431,6 +433,10 @@ if wing_kp == 96:
 
 if learnable_icp:
     exp_path = f"/NAS/spa176/papr-retarget/fit_pointcloud_logs/learnable_icp_wingL{wing_kp}_wingR{wing_kp}_body{body_kp}/L1_fix_wing_kp_{wing_kp}_body_kp_{body_kp}_kpnn_50_bodykpnn_{kpnn_body}_cdw1.0_rigidw1.0_nnwing5_nnbody{nn_body}_kp_only_p3dNorm/"
+
+if exp_id is not None:
+    exp_path = f"/NAS/spa176/papr-retarget/fit_pointcloud_logs/learnable_icp_wingL{wing_kp}_wingR{wing_kp}_body{body_kp}/exp_{exp_id}/L1_fix_wing_kp_{wing_kp}_body_kp_{body_kp}_kpnn_50_bodykpnn_{kpnn_body}_cdw1.0_rigidw1.0_nnwing5_nnbody{nn_body}_kp_only_p3dNorm/"
+    save_path = f"/NAS/spa176/papr-retarget/experiments/hummingbird-ft-{target_exp_index}-exp{exp_id}/"
 
 # create folder if not exists
 os.makedirs(save_path, exist_ok=True)

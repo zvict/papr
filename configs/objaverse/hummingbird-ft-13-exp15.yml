@@ -1,6 +1,6 @@
-index: "hummingbird-ft-12-kp-nnwing5-nnbody24-wkpnn50-bkpnn24-smooth-full-rbf-part-Licp"
+index: "hummingbird-ft-13-exp15"
 train: true
-load_path: "hummingbird-ft-12-kp-nnwing5-nnbody24-wkpnn50-bkpnn24-smooth-full-rbf-part-Licp"
+load_path: "hummingbird-ft-13-exp15"
 save_dir: "./experiments"
 seed: 1
 eps: 1.0e-6
@@ -335,10 +335,13 @@ eval:
     num_workers: 0
     num_slices: -1
   step: 5000
-  img_idx: 47
+  img_idx: 5
   # pc_file_path: "total_deformed_pc_new.pth"
   # pc_file_path: "total_deformed_pc_smooth_full.pth"
-  pc_file_path: "total_deformed_pc_rbf.pth"
+  # pc_file_path: "total_deformed_pc_rbf.pth"
+  pc_file_path: "total_deformed_pc_rbf_smooth.pth"
+  # pc_file_path: "total_deformed_pc_rbf_lda.pth"
+  # pc_file_path: "total_deformed_pc_rbf_lda_smooth.pth"
   skip_num: 5
   max_height: 100
   max_width: 100
