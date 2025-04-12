@@ -45,7 +45,7 @@ def setup_seed(seed):
 
 setup_seed(0)
 
-def plot_pointcloud(points, save_dir, title="", extra_points=None, plot_match=True):
+def plot_pointcloud(points, save_dir, title="", extra_points=None, plot_match=True, scale=1.0):
     points = points.unsqueeze(0) if points.dim() == 2 else points
     num_pc = points.shape[0]
 
@@ -59,9 +59,9 @@ def plot_pointcloud(points, save_dir, title="", extra_points=None, plot_match=Tr
         ax.set_xlabel('x')
         ax.set_ylabel('y')
         ax.set_zlabel('z')
-        ax.set_xlim(-0.6, 0.6)
-        ax.set_ylim(-0.6, 0.6)
-        ax.set_zlim(-0.6, 0.6)
+        ax.set_xlim(-0.6 * scale, 0.6 * scale)
+        ax.set_ylim(-0.6 * scale, 0.6 * scale)
+        ax.set_zlim(-0.6 * scale, 0.6 * scale)
         ax.set_title(title + f' pc {i} view 1')
         ax.view_init(9, -143)
 
@@ -79,9 +79,9 @@ def plot_pointcloud(points, save_dir, title="", extra_points=None, plot_match=Tr
         ax.set_xlabel('x')
         ax.set_ylabel('y')
         ax.set_zlabel('z')
-        ax.set_xlim(-0.6, 0.6)
-        ax.set_ylim(-0.6, 0.6)
-        ax.set_zlim(-0.6, 0.6)
+        ax.set_xlim(-0.6 * scale, 0.6 * scale)
+        ax.set_ylim(-0.6 * scale, 0.6 * scale)
+        ax.set_zlim(-0.6 * scale, 0.6 * scale)
         ax.set_title(title + f' pc {i} view 2')
         ax.view_init(79, 164)
 
@@ -535,12 +535,18 @@ def linear_sum_correspondence(src_trans_np, tgt_np, cur_tgt_normals, use_cos=Fal
     new_tgt_normals = np.zeros_like(cur_tgt_normals)
     tgt_indices = np.zeros(len(new_tgt_kp), dtype=np.int64)
 
-    # final_ori_tgt_kp = np.zeros_like(cur_src_kp)
-    for src_idx, tgt_idx in mapping:
-        new_tgt_kp[src_idx] = tgt_np[tgt_idx]
-        new_tgt_normals[src_idx] = cur_tgt_normals[tgt_idx]
-        tgt_indices[src_idx] = tgt_idx
-        # final_ori_tgt_kp[src_idx] = ori_tgt_kp[tgt_idx]
+    src_indices = np.array([src_idx for src_idx, _ in mapping])
+    tgt_indices_arr = np.array([tgt_idx for _, tgt_idx in mapping])
+    new_tgt_kp[src_indices] = tgt_np[tgt_indices_arr]
+    new_tgt_normals[src_indices] = cur_tgt_normals[tgt_indices_arr]
+    tgt_indices[src_indices] = tgt_indices_arr
+
+    # # final_ori_tgt_kp = np.zeros_like(cur_src_kp)
+    # for src_idx, tgt_idx in mapping:
+    #     new_tgt_kp[src_idx] = tgt_np[tgt_idx]
+    #     new_tgt_normals[src_idx] = cur_tgt_normals[tgt_idx]
+    #     tgt_indices[src_idx] = tgt_idx
+    #     # final_ori_tgt_kp[src_idx] = ori_tgt_kp[tgt_idx]
     return new_tgt_kp, new_tgt_normals, tgt_indices
 
 
@@ -677,7 +683,7 @@ def modified_icp_nn_new(
         os.makedirs(save_path, exist_ok=True)
 
         plot_pointcloud(
-            torch.cat(tgt, dim=0), save_path, title=f"Target Point Cloud"
+            torch.cat(tgt, dim=0), save_path, title=f"Target Point Cloud", scale=VISIUAL_SCALE
         )
         match_frames = []
 
@@ -841,14 +847,18 @@ def modified_icp_nn_new(
             # Save the transformed point cloud
             if it % 10 == 0 or it == iterations - 1 or (stop and early_stop):
                 plot_pointcloud(
-                    src_transformed, save_path, title=f"Transformed Point Cloud Iter {it}",
+                    src_transformed, save_path, title=f"Transformed Point Cloud Iter {it}", scale=VISIUAL_SCALE
                     # extra_points=tgt, plot_match=False
                 )
                 if plot_match:
                     # plot a vector that connects each point to the corresponding nearest neighbor
                     cur_frame = plot_pointcloud(
-                        src_transformed, None, title=f"Match Iter {it}",
-                        extra_points=tgt_nn, plot_match=True
+                        src_transformed,
+                        None,
+                        title=f"Match Iter {it}",
+                        extra_points=tgt_nn,
+                        plot_match=True,
+                        scale=VISIUAL_SCALE,
                     )
                     match_frames.append(cur_frame)
                     if it % 100 == 0 or (stop and early_stop):
@@ -873,9 +883,13 @@ def modified_icp_nn_new(
 
     save_dir = save_img_dir if time_step % 10 == 0 else None
     cur_frame = plot_pointcloud(
-                    src_transformed, save_dir, title=f"Time Step {time_step}",
-                    extra_points=tgt_nn, plot_match=True
-                )
+        src_transformed,
+        save_dir,
+        title=f"Time Step {time_step}",
+        extra_points=tgt_nn,
+        plot_match=True,
+        scale=VISIUAL_SCALE,
+    )
 
     return models, src_transformed.detach(), cur_frame, it, all_tgt_indices
 
@@ -1242,28 +1256,40 @@ CONCAT_POS_DEFORM = True
 # USE_COS = True
 USE_COS = False
 ADJUST_BOUNDARY = False
+USE_KEYPOINTS = True
 
+root_part = np.load("/NAS/spa176/papr-retarget/bird_Body_vertices.npy")
+child_part_0 = np.load("/NAS/spa176/papr-retarget/bird_LeftWing_vertices.npy")
+child_part_1 = np.load("/NAS/spa176/papr-retarget/bird_RightWing_vertices.npy")
+# concatenate the parts to make the full point cloud
+tgt_pc_parts = [root_part, child_part_0, child_part_1]
+tgt_pc = np.concatenate(tgt_pc_parts, axis=0)
+
+# print the number of points in each part
+print("Number of points in each part:")
+print("Body: ", len(root_part))
+print("Left Wing: ", len(child_part_0))
+print("Right Wing: ", len(child_part_1))
 
 # fps_k = 1000
-num_keypoints_left = 96
-num_keypoints_right = 96
-num_keypoints_body = 256
+if USE_KEYPOINTS:
+    num_keypoints_left = 96
+    num_keypoints_right = 96
+    num_keypoints_body = 256
+else:
+    num_keypoints_left = len(child_part_0)
+    num_keypoints_right = len(child_part_1)
+    num_keypoints_body = len(root_part)
 # num_keypoints_body = 128
 # num_keypoints_body = 5600
 all_num_keypoints = [num_keypoints_body, num_keypoints_left, num_keypoints_right]
-icp_instance = False
 
-scale = 10.0
+
 log_dir = "fit_pointcloud_logs"
-exp_dir = f"mp_wingL{num_keypoints_left}_wingR{num_keypoints_right}_body{num_keypoints_body}"
-
-if icp_instance:
-    exp_dir += "_icp"
-if USE_COS:
-    exp_dir += "_cos"
+exp_dir = f"blender_mp_wingL{num_keypoints_left}_wingR{num_keypoints_right}_body{num_keypoints_body}"
 
 # exp_id = 7
-exp_id = 27
+exp_id = 2
 
 exp_sub_dir = f"exp_{exp_id}"
 log_dir = os.path.join(log_dir, exp_dir, exp_sub_dir)
@@ -1276,24 +1302,37 @@ save_img_dir = os.path.join(log_dir, "images")
 if not os.path.exists(save_img_dir):
     os.makedirs(save_img_dir, exist_ok=True)
 
-# src_iter = 30000
-src_iter = 0
+src_iter = 30000
+# src_iter = 0
 # src_iter = 24000
 src_pc_path = f"/NAS/spa176/papr-retarget/point_clouds/butterfly/points_{src_iter}.npy"
-# src_pc_path = "/NAS/spa176/papr-retarget/point_clouds/butterfly/points_0.npy"
-# src_pc_path = "/NAS/spa176/papr-retarget/point_clouds/butterfly/points_30000.npy"
-# src_pc_path = f"/NAS/spa176/papr-retarget/point_clouds/butterfly/points_{num_keypoints_body}.npy"
-tgt_pc_path = "/NAS/spa176/papr-retarget/point_clouds/hummingbird/points_0.npy"
-# tgt_pc_path = "/NAS/spa176/papr-retarget/point_clouds/butterfly/points_0.npy"
 
 src_pc = np.load(src_pc_path)
-tgt_pc = np.load(tgt_pc_path)
+
+# scale = 10.0
+# src_pc = src_pc / scale
+
+source_ranges = np.max(src_pc, axis=0) - np.min(src_pc, axis=0)
+target_ranges = np.max(tgt_pc, axis=0) - np.min(tgt_pc, axis=0)
+
+# Calculate dimension-wise scale ratios
+scale_ratios = target_ranges / source_ranges
+
+# Use the maximum scale ratio for consistent scaling
+scale = np.min(scale_ratios)
+# scale
+print("Scale: ", scale)
+
+src_pc = src_pc * scale
+
+VISIUAL_SCALE = 5.0
+
+# tgt_pc = tgt_pc / scale
 
 src_pc = torch.tensor(src_pc).float().to(device)
 tgt_pc = torch.tensor(tgt_pc).float().to(device)
 
-src_pc = src_pc / scale
-tgt_pc = tgt_pc / scale
+
 # tgt_pc[..., 0] += 0.1
 # tgt_pc[..., 1] -= 0.2
 # tgt_pc[..., 2] += 0.3
@@ -1303,8 +1342,8 @@ print("src_pc: ", src_pc.shape, src_pc.min(), src_pc.max())
 print("tgt_pc: ", tgt_pc.shape, tgt_pc.min(), tgt_pc.max())
 
 # Plot the point clouds
-plot_pointcloud(src_pc, log_dir, title="Source Point Cloud")
-plot_pointcloud(tgt_pc, log_dir, title="Target Point Cloud")
+plot_pointcloud(src_pc, log_dir, title="Source Point Cloud", scale=VISIUAL_SCALE)
+plot_pointcloud(tgt_pc, log_dir, title="Target Point Cloud", scale=VISIUAL_SCALE)
 
 
 # load wing indices
@@ -1316,13 +1355,13 @@ but_wing_indices_left = np.setdiff1d(
     np.arange(len(but_wing_indices)), but_wing_indices_right
 )
 
-bird_wing_indices = np.load("hummingbird_wing_indices.npy")
-bird_body_indices = np.setdiff1d(np.arange(len(tgt_pc)), bird_wing_indices)
+# bird_wing_indices = np.load("hummingbird_wing_indices.npy")
+# bird_body_indices = np.setdiff1d(np.arange(len(tgt_pc)), bird_wing_indices)
 
-bird_wing_indices_right = np.load("hummingbird_wing_indices_right.npy")
-bird_wing_indices_left = np.setdiff1d(
-    np.arange(len(bird_wing_indices)), bird_wing_indices_right
-)
+# bird_wing_indices_right = np.load("hummingbird_wing_indices_right.npy")
+# bird_wing_indices_left = np.setdiff1d(
+#     np.arange(len(bird_wing_indices)), bird_wing_indices_right
+# )
 
 
 # init_kps = []
@@ -1339,11 +1378,11 @@ bird_wing_indices_left = np.setdiff1d(
 #     bird_body_indices,
 # ]
 src_part_indices = [but_body_indices, but_wing_indices[but_wing_indices_left], but_wing_indices[but_wing_indices_right]]
-tgt_part_indices = [
-    bird_body_indices,
-    bird_wing_indices[bird_wing_indices_left],
-    bird_wing_indices[bird_wing_indices_right],
-]
+# tgt_part_indices = [
+#     bird_body_indices,
+#     bird_wing_indices[bird_wing_indices_left],
+#     bird_wing_indices[bird_wing_indices_right],
+# ]
 use_hierarchical_transformation = True
 total_part_num = 3
 joint_k = 1
@@ -1374,22 +1413,30 @@ if USE_ICP:
             src_pc[src_part_indices[part_idx]].unsqueeze(0), K=all_num_keypoints[part_idx]
         )
         # cur_src_kp = cur_src_kp.squeeze(0)
-        cur_tgt_kp, tgt_kp_idx = sfp(tgt_pc[tgt_part_indices[part_idx]].unsqueeze(0), K=all_num_keypoints[part_idx])
-
+        if USE_KEYPOINTS:
+            cur_tgt_kp, tgt_kp_idx = sfp(
+                torch.from_numpy(tgt_pc_parts[part_idx])
+                .float()
+                .to(device)
+                .unsqueeze(0),
+                K=all_num_keypoints[part_idx],
+            )
+            cur_tgt_kp = cur_tgt_kp.squeeze(0)
+        else:
+            cur_tgt_kp = torch.from_numpy(tgt_pc_parts[part_idx]).float().to(device)
         # ori_tgt_kps.append(torch.from_numpy(final_ori_tgt_kp).float())
 
-        src_kps.append(cur_src_kp.squeeze())
+        src_kps.append(cur_src_kp.squeeze(0))
         src_kp_indices.append(src_kp_idx)
         # kp_indices.append(src_kp_idx)
-        tgt_kps.append(cur_tgt_kp.squeeze())
+        # tgt_kps.append(torch.from_numpy(tgt_pc_parts[part_idx] / scale).float().to(device))
+        tgt_kps.append(cur_tgt_kp)
         # tgt_pcs.append(cur_tgt_pc.clone().cpu())
         # torch.save(
         #     tgt_pc[tgt_part_indices[part_idx]],
         #     os.path.join(log_dir, f"part{part_idx}_tgt_pc_ori.pth")
         # )
-        tgt_pcs.append(
-            tgt_pc[tgt_part_indices[part_idx]]
-        )
+        tgt_pcs.append(tgt_pc_parts[part_idx])
         src_volumes.append(estimate_volume(src_kps[part_idx].cpu().numpy()))
 
     if use_hierarchical_transformation:
@@ -1403,10 +1450,13 @@ if USE_ICP:
             joint_pos.append(cur_joint_pos.unsqueeze(0))
 
 
-start = 0
-end = 30001
-interval = 200
-scale = 10.0
+# start = 0
+# end = 30001
+# interval = 200
+start = 30000
+end = -1
+interval = -200
+# scale = 10.0
 smooth_window_size = 35
 
 src_pc_dir = "/NAS/spa176/papr-retarget/point_clouds/butterfly/"
@@ -1415,7 +1465,8 @@ src_keypoints = [[] for _ in range(total_part_num)]
 for idx in tqdm.tqdm(range(start, end, interval)):
     src_pc_path = os.path.join(src_pc_dir, f"points_{idx}.npy")
     cur_src_pc = np.load(src_pc_path)
-    cur_src_pc = cur_src_pc / scale
+    # cur_src_pc = cur_src_pc / scale
+    cur_src_pc = cur_src_pc * scale
     # point_clouds.append(cur_src_pc)
     for part_idx in range(total_part_num):
         cur_src_kp = cur_src_pc[src_part_indices[part_idx]][src_kp_indices[part_idx].cpu().numpy()]
@@ -1498,7 +1549,7 @@ if TRAIN_ICP_MODEL:
                     for src_volume_ratio in src_volume_ratios
                 ],
                 init_volumes=base_volumes,
-                stop_volume_error_rates=[0.05, 1.0, 1.0],
+                stop_volume_error_rates=[0.05, 10.0, 10.0],
                 # stop_volume_ratio=0.97,
                 # loss_modes=["chamfer", "pt2plane", "pt2plane"],
                 # hierarchical_transformation=use_hierarchical_transformation,
@@ -1528,101 +1579,137 @@ if TRAIN_ICP_MODEL:
             imageio.mimsave(os.path.join(save_img_dir, "match_frames.mp4"), match_frames, fps=10)
 
         transferred_tgt_kps.append(src_transformed.unsqueeze(0))
-        torch.save(torch.cat(transferred_tgt_kps, dim=0), os.path.join(log_dir, f"transferred_tgt_kps.pth"))
+        # torch.save(torch.cat(transferred_tgt_kps, dim=0) * scale, os.path.join(log_dir, f"transferred_tgt_kps.pth"))
+        torch.save(
+            torch.cat(transferred_tgt_kps, dim=0),
+            os.path.join(log_dir, f"transferred_tgt_kps.pth"),
+        )
 
     # save the match frames to save_img_dir as mp4
     if len(match_frames) > 0:
         imageio.mimsave(os.path.join(save_img_dir, "match_frames.mp4"), match_frames, fps=10)
 
+    # transferred_tgt_kps = torch.cat(transferred_tgt_kps, dim=0) * scale
     transferred_tgt_kps = torch.cat(transferred_tgt_kps, dim=0)
     # save the transferred_tgt_kps to disk as torch tensor
-    torch.save(transferred_tgt_kps, os.path.join(log_dir, f"transferred_tgt_kps.pth"))
+    # torch.save(transferred_tgt_kps, os.path.join(log_dir, f"transferred_tgt_kps.pth"))
+
+    smoothed_total_deformed_pcs = smooth_point_cloud_torch(transferred_tgt_kps, smooth_window_size)
+    # torch.save(smoothed_total_deformed_pcs, os.path.join(log_dir, f"transferred_tgt_kps_smooth.pth"))
+
+    # save numpy version
+    transferred_tgt_kps_np = transferred_tgt_kps.cpu().numpy()
+    if USE_KEYPOINTS:
+        save_pt_name = "kps"
+    else:
+        save_pt_name = "pts"
+    np.save(
+        os.path.join(log_dir, f"deformed_{save_pt_name}.npy"), transferred_tgt_kps_np
+    )
+    smoothed_total_deformed_pcs = smoothed_total_deformed_pcs.cpu().numpy()
+    np.save(
+        os.path.join(log_dir, f"deformed_{save_pt_name}_smooth.npy"),
+        smoothed_total_deformed_pcs,
+    )
+
 else:
     transferred_tgt_kps = torch.load(os.path.join(log_dir, f"transferred_tgt_kps.pth"))
     print("Loaded", transferred_tgt_kps.shape)
 
-rbf_kernel = "polyharmonic_spline"
-ext_params = {"k": 3} if rbf_kernel == "polyharmonic_spline" else {}
-rbf_radius = 10
+if USE_KEYPOINTS:
+    rbf_kernel = "polyharmonic_spline"
+    ext_params = {"k": 3} if rbf_kernel == "polyharmonic_spline" else {}
+    rbf_radius = 10
 
-print("=" * 20)
-print("Motion transfer finished, start to deform the point cloud")
+    print("=" * 20)
+    print("Motion transfer finished, start to recover the full point cloud")
 
-total_deformed_pcs = []
-for cur_step in tqdm.tqdm(range(total_time_steps)):
-    cur_deformed_pcs = []
-    for part_idx in range(total_part_num):
-        start_idx = 0 if part_idx == 0 else start_idx + len(src_kp_indices[part_idx - 1][0])
-        end_idx = start_idx + len(src_kp_indices[part_idx][0])
-        if cur_step == 0:
-            print(f"Slicing part_idx: {part_idx}, start_idx: {start_idx}, end_idx: {end_idx}")
-        rbf = RBF(
-            original_control_points=tgt_kps[part_idx].cpu().numpy() * scale,
-            deformed_control_points=transferred_tgt_kps[cur_step, start_idx:end_idx, :].cpu().numpy() * scale,
-            radius=rbf_radius,
-            func=rbf_kernel,
-            extra_parameter=ext_params,
-        )
-        # # Deform the surface points
-        deformed_full_point_cloud = rbf(tgt_pcs[part_idx].cpu().numpy() * scale)
-        cur_deformed_pcs.append(
-            torch.from_numpy(deformed_full_point_cloud)
-            .float()
-            .to(device)
-        )
-    total_deformed_pcs.append(torch.cat(cur_deformed_pcs, dim=0))
+    total_deformed_pcs = []
+    for cur_step in tqdm.tqdm(range(total_time_steps)):
+        cur_deformed_pcs = []
+        for part_idx in range(total_part_num):
+            start_idx = 0 if part_idx == 0 else start_idx + len(src_kp_indices[part_idx - 1][0])
+            end_idx = start_idx + len(src_kp_indices[part_idx][0])
+            if cur_step == 0:
+                print(f"Slicing part_idx: {part_idx}, start_idx: {start_idx}, end_idx: {end_idx}")
+            rbf = RBF(
+                original_control_points=tgt_kps[part_idx].cpu().numpy(),
+                deformed_control_points=transferred_tgt_kps[
+                    cur_step, start_idx:end_idx, :
+                ].cpu().numpy(),
+                radius=rbf_radius,
+                func=rbf_kernel,
+                extra_parameter=ext_params,
+            )
+            # # Deform the surface points
+            deformed_full_point_cloud = rbf(tgt_pcs[part_idx])
+            cur_deformed_pcs.append(
+                torch.from_numpy(deformed_full_point_cloud)
+                .float()
+                .to(device)
+            )
+        total_deformed_pcs.append(torch.cat(cur_deformed_pcs, dim=0))
 
-total_deformed_pcs = torch.stack(total_deformed_pcs, dim=0)
+    total_deformed_pcs = torch.stack(total_deformed_pcs, dim=0)
+    np.save(os.path.join(log_dir, f"deformed_pts.npy"), total_deformed_pcs.cpu().numpy())
+    smoothed_total_deformed_pcs = smooth_point_cloud_torch(
+        total_deformed_pcs, smooth_window_size
+    )
+    np.save(
+        os.path.join(log_dir, f"deformed_pts_smooth.npy"),
+        smoothed_total_deformed_pcs.cpu().numpy(),
+    )
+    print("Deformation finished, saved to disk")
 
-target_exp_index = 13
-save_model_path = f"/NAS/spa176/papr-retarget/experiments/hummingbird-ft-{target_exp_index}-exp{exp_id}/"
-os.makedirs(save_model_path, exist_ok=True)
+# target_exp_index = 13
+# save_model_path = f"/NAS/spa176/papr-retarget/experiments/hummingbird-ft-{target_exp_index}-exp{exp_id}/"
+# os.makedirs(save_model_path, exist_ok=True)
 
-state_dict = torch.load("/NAS/spa176/papr-retarget/experiments/hummingbird-start-1/model_no_rot_fix_name.pth")
-step = list(state_dict.keys())[0]
-state_dict = state_dict[step]
+# state_dict = torch.load("/NAS/spa176/papr-retarget/experiments/hummingbird-start-1/model_no_rot_fix_name.pth")
+# step = list(state_dict.keys())[0]
+# state_dict = state_dict[step]
 
-new_pc_feats = [state_dict["pc_feats"][tgt_part_indices[part_idx]] for part_idx in range(total_part_num)]
-new_pc_feats = torch.cat(new_pc_feats, dim=0)
-state_dict["pc_feats"] = new_pc_feats
+# new_pc_feats = [state_dict["pc_feats"][tgt_part_indices[part_idx]] for part_idx in range(total_part_num)]
+# new_pc_feats = torch.cat(new_pc_feats, dim=0)
+# state_dict["pc_feats"] = new_pc_feats
 
-new_points_influ_scores = [state_dict["points_influ_scores"][tgt_part_indices[part_idx]] for part_idx in range(total_part_num)]
-new_points_influ_scores = torch.cat(new_points_influ_scores, dim=0)
-state_dict["points_influ_scores"] = new_points_influ_scores
+# new_points_influ_scores = [state_dict["points_influ_scores"][tgt_part_indices[part_idx]] for part_idx in range(total_part_num)]
+# new_points_influ_scores = torch.cat(new_points_influ_scores, dim=0)
+# state_dict["points_influ_scores"] = new_points_influ_scores
 
-# align the deformed_pc with original pc
-converged, rmse, Xt, RTs, t_history = icp(
-    total_deformed_pcs[0].unsqueeze(0), state_dict["points"].unsqueeze(0), max_iterations=300
-)
-print(f"ICP converged: {converged}, RMSE: {rmse}, Iterations: {len(t_history)}, Final Transformation: {Xt.shape}")
-# deformed_pc = Xt.squeeze(0)
+# # align the deformed_pc with original pc
+# converged, rmse, Xt, RTs, t_history = icp(
+#     total_deformed_pcs[0].unsqueeze(0), state_dict["points"].unsqueeze(0), max_iterations=300
+# )
+# print(f"ICP converged: {converged}, RMSE: {rmse}, Iterations: {len(t_history)}, Final Transformation: {Xt.shape}")
+# # deformed_pc = Xt.squeeze(0)
 
-R = RTs.R
-T = RTs.T
+# R = RTs.R
+# T = RTs.T
 
-total_deformed_pcs = torch.bmm(total_deformed_pcs, R.expand(total_deformed_pcs.shape[0], 3, 3)) + T[:, None, :].expand(total_deformed_pcs.shape[0], -1, 3)
+# total_deformed_pcs = torch.bmm(total_deformed_pcs, R.expand(total_deformed_pcs.shape[0], 3, 3)) + T[:, None, :].expand(total_deformed_pcs.shape[0], -1, 3)
 
-save_pc_name = f"total_deformed_pc_rbf.pth"
-# save the transformed deformed_pc
-torch.save(total_deformed_pcs, save_model_path + save_pc_name)
-
-
-smoothed_total_deformed_pcs = smooth_point_cloud_torch(total_deformed_pcs, smooth_window_size)
-save_pc_name = f"total_deformed_pc_rbf_smooth.pth"
-torch.save(smoothed_total_deformed_pcs, save_model_path + save_pc_name)
-
-
-LDA(total_deformed_pcs, smooth_knn=100)
-save_pc_name = f"total_deformed_pc_rbf_lda.pth"
-torch.save(total_deformed_pcs, save_model_path + save_pc_name)
-
-LDA(smoothed_total_deformed_pcs, smooth_knn=100)
-save_pc_name = f"total_deformed_pc_rbf_lda_smooth.pth"
-torch.save(smoothed_total_deformed_pcs, save_model_path + save_pc_name)
-
-state_dict["points"] = total_deformed_pcs[0]
-save_sd = {step: state_dict}
-torch.save(save_sd, save_model_path + "model.pth")
+# save_pc_name = f"total_deformed_pc_rbf.pth"
+# # save the transformed deformed_pc
+# torch.save(total_deformed_pcs, save_model_path + save_pc_name)
 
 
-print("Model saved!")
+# smoothed_total_deformed_pcs = smooth_point_cloud_torch(total_deformed_pcs, smooth_window_size)
+# save_pc_name = f"total_deformed_pc_rbf_smooth.pth"
+# torch.save(smoothed_total_deformed_pcs, save_model_path + save_pc_name)
+
+
+# LDA(total_deformed_pcs, smooth_knn=100)
+# save_pc_name = f"total_deformed_pc_rbf_lda.pth"
+# torch.save(total_deformed_pcs, save_model_path + save_pc_name)
+
+# LDA(smoothed_total_deformed_pcs, smooth_knn=100)
+# save_pc_name = f"total_deformed_pc_rbf_lda_smooth.pth"
+# torch.save(smoothed_total_deformed_pcs, save_model_path + save_pc_name)
+
+# state_dict["points"] = total_deformed_pcs[0]
+# save_sd = {step: state_dict}
+# torch.save(save_sd, save_model_path + "model.pth")
+
+
+# print("Model saved!")

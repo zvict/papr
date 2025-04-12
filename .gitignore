@@ -13,3 +13,5 @@ deform_pointcloud_logs/
 fit_pointcloud_logs/
 *.npy
 *.txt
+blender/
+unused_scripts/
