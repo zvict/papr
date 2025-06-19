@@ -12,6 +12,13 @@ ordered_group_names = ["Body", "LeftWing", "RightWing"]
 
 if obj and obj.type == "MESH":
     mesh = obj.data
+    # save the vertices to a numpy array
+    all_vertex_coords = np.empty((len(mesh.vertices), 3), dtype=np.float32)
+    mesh.vertices.foreach_get("co", all_vertex_coords.ravel())
+
+    # Save the vertices to a numpy array
+    np.save(os.path.join(save_dir, f"bird_vertices.npy"), all_vertex_coords)
+
     for group_name in ordered_group_names:
         # Find the vertex group by name
         if group_name in obj.vertex_groups:

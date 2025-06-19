@@ -85,7 +85,7 @@ np.random.seed(SEED)
 object_name_to_copy = "Object_7"
 # CUR_ANGLE = 34  # Used for output directory naming, not directly for animation here
 # OUTPUT_BASE_DIR = f"/NAS/spa176/papr-retarget/blender/hummingbird/motion_{CUR_ANGLE}/"
-EXP_ID = 2  # Used for output directory naming, not directly for animation here
+EXP_ID = 10  # Used for output directory naming, not directly for animation here
 OUTPUT_BASE_DIR = f"/NAS/spa176/papr-retarget/blender/hummingbird/exp_{EXP_ID}/"
 # OUTPUT_BLEND_DIR = os.path.join(OUTPUT_BASE_DIR, "blend_output")
 OUTPUT_BLEND_DIR = OUTPUT_BASE_DIR
@@ -98,7 +98,8 @@ OUTPUT_MDD_FILENAME = f"{object_name_to_copy}_deformation.mdd"
 
 
 # DEFORMATION_DATA_PATH = "/NAS/spa176/papr-retarget/fit_pointcloud_logs/blender_mp_wingL520_wingR520_body1134/exp_1/deformed_pts_smooth.npy"
-DEFORMATION_DATA_PATH = "/NAS/spa176/papr-retarget/fit_pointcloud_logs/blender_mp_wingL96_wingR96_body256/exp_2/deformed_pts_smooth.npy"
+# DEFORMATION_DATA_PATH = "/NAS/spa176/papr-retarget/fit_pointcloud_logs/blender_mp_wingL96_wingR96_body256/exp_3/deformed_pts_smooth.npy"
+DEFORMATION_DATA_PATH = "/NAS/spa176/papr-retarget/fit_pointcloud_logs/blender_mp_wingL96_wingR96_body256/exp_10/deformed_pts_smooth.npy"
 
 VERTEX_INDICES_DIR = "/NAS/spa176/papr-retarget/"
 VERTEX_GROUP_NAMES = ["Body", "RightWing", "LeftWing"]
