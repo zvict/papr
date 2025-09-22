@@ -8,7 +8,7 @@ from tqdm.auto import tqdm  # added
 import time  # added
 import plotly.graph_objs as go
 
-from typing import Optional, Tuple, Dict
+from typing import Any, Optional, Tuple, Dict
 
 # =========================
 # Utils: SO(3) operations
@@ -164,6 +164,116 @@ def infer_part_adjacency(points: torch.Tensor, labels: torch.Tensor, tau: Option
             d = torch.norm(C[i]-C[j]).item()
             if d < (R[i]+R[j]).item() + tau:
                 A[i,j] = A[j,i] = True
+    return A, parts
+
+
+def infer_part_adjacency_boundary(points: torch.Tensor,
+                                  part_indices: Dict[Any, torch.Tensor],
+                                  boundary_percentile: float = 0.2,
+                                  distance_factor: float = 1.5,
+                                  min_contact_pairs: int = 5,
+                                  knn_within: int = 6) -> torch.Tensor:
+    """Infer part adjacency using cross-part boundary proximity.
+
+    The heuristic keeps near-boundary samples for each part, compares them against
+    neighboring parts, and links parts that exhibit sufficient close contacts.
+
+    Args:
+        points: (N,3) point cloud.
+        part_indices: mapping from part id -> indices of its points.
+        boundary_percentile: quantile threshold for selecting boundary samples
+            based on the nearest other-part distance.
+        distance_factor: multiplier on the local point spacing to set the
+            contact distance threshold.
+        min_contact_pairs: minimal number of close boundary pairs required to
+            form an edge.
+        knn_within: number of intra-part neighbors to estimate point spacing.
+
+    Returns:
+        adjacency (P,P) bool tensor and the ordered list of part ids.
+    """
+
+    parts = list(part_indices.keys())
+    P = len(parts)
+    device = points.device
+    dtype = points.dtype
+    part_points = {p: points[idx] for p, idx in part_indices.items()}
+
+    # Gather indices and per-part point spacing statistics.
+    part_spacing = {}
+    spacings = []
+    for p in parts:
+        idx = part_indices[p]
+        pts = part_points[p]
+        if pts.shape[0] <= 1:
+            spacing = torch.tensor(float("inf"), device=device, dtype=dtype)
+        else:
+            k = min(knn_within, pts.shape[0] - 1)
+            d = torch.cdist(pts, pts)
+            nn = d.topk(k=k + 1, largest=False).values[:, 1:k + 1]
+            spacing = nn[:, -1].median()
+        part_spacing[p] = spacing
+        if torch.isfinite(spacing):
+            spacings.append(spacing)
+    global_spacing = torch.stack(spacings).median() if spacings else torch.tensor(1.0, device=device, dtype=dtype)
+    global_spacing = torch.clamp_min(global_spacing, 1e-6)
+
+    # Minimum distance from each point to another part (used for boundary detection).
+    N = points.shape[0]
+    cross_part_distance = torch.full((N,), float("inf"), device=device, dtype=dtype)
+    for i, p_i in enumerate(parts):
+        idx_i = part_indices[p_i]
+        pts_i = part_points[p_i]
+        for j in range(i + 1, P):
+            p_j = parts[j]
+            idx_j = part_indices[p_j]
+            pts_j = part_points[p_j]
+            if pts_i.shape[0] == 0 or pts_j.shape[0] == 0:
+                continue
+            d_ij = torch.cdist(pts_i, pts_j)
+            cross_part_distance[idx_i] = torch.minimum(cross_part_distance[idx_i], d_ij.min(dim=1).values)
+            cross_part_distance[idx_j] = torch.minimum(cross_part_distance[idx_j], d_ij.min(dim=0).values)
+
+    # Select boundary samples per part.
+    boundary_indices = {}
+    for p in parts:
+        idx = part_indices[p]
+        if idx.shape[0] == 0:
+            boundary_indices[p] = idx
+            continue
+        dist = cross_part_distance[idx]
+        if torch.isfinite(dist).any():
+            thresh = torch.quantile(dist[torch.isfinite(dist)], boundary_percentile)
+            mask = dist <= thresh
+            if mask.sum() == 0:
+                mask = torch.ones_like(mask)
+        else:
+            mask = torch.ones_like(dist, dtype=torch.bool, device=device)
+        boundary_indices[p] = idx[mask]
+
+    # Build adjacency by counting close boundary pairs.
+    A = torch.zeros((P, P), dtype=torch.bool, device=device)
+    for i in range(P):
+        p_i = parts[i]
+        idx_i = boundary_indices[p_i]
+        pts_i = points[idx_i] if idx_i.shape[0] > 0 else points[part_indices[p_i]]
+        spacing_i = part_spacing[p_i]
+        spacing_i_val = spacing_i if torch.isfinite(spacing_i).item() else global_spacing
+        for j in range(i + 1, P):
+            p_j = parts[j]
+            idx_j = boundary_indices[p_j]
+            pts_j = points[idx_j] if idx_j.shape[0] > 0 else points[part_indices[p_j]]
+            if pts_i.shape[0] == 0 or pts_j.shape[0] == 0:
+                continue
+            d_ij = torch.cdist(pts_i, pts_j)
+            spacing_j = part_spacing[p_j]
+            spacing_j_val = spacing_j if torch.isfinite(spacing_j).item() else global_spacing
+            local_spacing = torch.min(torch.stack([spacing_i_val, spacing_j_val, global_spacing]))
+            local_spacing = torch.clamp_min(local_spacing, 1e-6)
+            thresh = distance_factor * local_spacing
+            close_pairs = (d_ij <= thresh).sum().item()
+            if close_pairs >= min_contact_pairs:
+                A[i, j] = A[j, i] = True
     return A, parts
 
 
@@ -575,6 +685,8 @@ def run_pipeline_deform_graph(
     normal_k: int = 16,
     knn_recompute_every: int = 1,   # set >1 for speed (approximate)
     seam_arap_k: int = 8,
+    stages: Optional[list] = None,   # which training stages to run, default [1,2,3,4]
+    skip_per_part_rigid_init: bool = False,  # skip the pre-training rigid alignment init
 ) -> np.ndarray:
     """
     Deformation-graph pipeline with normal-aware OT, designed to be called from the user's main.
@@ -618,25 +730,26 @@ def run_pipeline_deform_graph(
             R = Vt.t() @ U.t()
         t = muB - (R @ muA)
         return R, t
-    with torch.no_grad():
-        parts = torch.unique(tgt_labels).tolist()
-        for p in parts:
-            tgt_mask = (tgt_labels==p)
-            if source_segmentation is not None:
-                src_labels = torch.from_numpy(source_segmentation).to(device)
-                src_mask = (src_labels==p)
-            else:
-                src_mask = tgt_mask  # assume label spaces match
-            if tgt_mask.sum()<4 or src_mask.sum()<4:
-                continue
-            R_p, t_p = rigid_align(Xt0[tgt_mask], Xs[src_mask])
-            # apply to nodes of this part
-            node_mask = (graph['G_part']==p)
-            if node_mask.any():
-                # set so3_vec via log map and trans = t_p
-                so3 = log_so3(R_p[None,:,:])[0]
-                model.so3_vec.data[node_mask] = so3
-                model.trans.data[node_mask] = t_p
+    if not skip_per_part_rigid_init:
+        with torch.no_grad():
+            parts = torch.unique(tgt_labels).tolist()
+            for p in parts:
+                tgt_mask = (tgt_labels==p)
+                if source_segmentation is not None:
+                    src_labels = torch.from_numpy(source_segmentation).to(device)
+                    src_mask = (src_labels==p)
+                else:
+                    src_mask = tgt_mask  # assume label spaces match
+                if tgt_mask.sum()<4 or src_mask.sum()<4:
+                    continue
+                R_p, t_p = rigid_align(Xt0[tgt_mask], Xs[src_mask])
+                # apply to nodes of this part
+                node_mask = (graph['G_part']==p)
+                if node_mask.any():
+                    # set so3_vec via log map and trans = t_p
+                    so3 = log_so3(R_p[None,:,:])[0]
+                    model.so3_vec.data[node_mask] = so3
+                    model.trans.data[node_mask] = t_p
 
     # ---------- Visualization helpers ----------
     def _plot_pointcloud(
@@ -886,19 +999,26 @@ def run_pipeline_deform_graph(
         return best_posed if best_posed is not None else posed_np
 
     # ----------------- STAGES -----------------
+    if stages is None:
+        stages = [1,2,3,4]
     total_start = time.time()
+    last_posed = Xt0.detach().cpu().numpy()
     # Stage 1: rigid only (hard weights, no residual)
-    model.disable_soft_weights(bake=True, hard=True)
-    stage1_posed = train_stage(1, iters//4, optimize_transforms=True, optimize_weights=False, enable_residual_flag=False, optimize_residual=False, stage_lr=lr)
+    if 1 in stages:
+        model.disable_soft_weights(bake=True, hard=True)
+        last_posed = train_stage(1, iters//4, optimize_transforms=True, optimize_weights=False, enable_residual_flag=False, optimize_residual=False, stage_lr=lr)
     # Stage 2: optimize skinning weights (soft), freeze transforms, still no residual
-    stage2_posed = train_stage(2, iters//4, optimize_transforms=False, optimize_weights=True, enable_residual_flag=False, optimize_residual=False, stage_lr=lr*0.5)
+    if 2 in stages:
+        last_posed = train_stage(2, iters//4, optimize_transforms=False, optimize_weights=True, enable_residual_flag=False, optimize_residual=False, stage_lr=lr*0.5)
     # Stage 3: residual MLP only
-    stage3_posed = train_stage(3, iters//4, optimize_transforms=False, optimize_weights=False, enable_residual_flag=True, optimize_residual=True, stage_lr=lr*0.5)
+    if 3 in stages:
+        last_posed = train_stage(3, iters//4, optimize_transforms=False, optimize_weights=False, enable_residual_flag=True, optimize_residual=True, stage_lr=lr*0.5)
     # Stage 4: joint fine-tune
-    stage4_posed = train_stage(4, iters - 3*(iters//4), optimize_transforms=True, optimize_weights=True, enable_residual_flag=True, optimize_residual=True, stage_lr=lr*0.25)
+    if 4 in stages:
+        last_posed = train_stage(4, iters - 3*(iters//4), optimize_transforms=True, optimize_weights=True, enable_residual_flag=True, optimize_residual=True, stage_lr=lr*0.25)
     total_time = time.time() - total_start
     print(f"All stages complete in {total_time:.2f}s")
-    return stage4_posed
+    return last_posed
 
 def fused_seam_arap_losses(posed: torch.Tensor,
                            skinned: torch.Tensor,

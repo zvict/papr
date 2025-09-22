@@ -44,6 +44,7 @@ from pytorch3d.ops.points_alignment import iterative_closest_point, SimilarityTr
 from geomloss import SamplesLoss  # GPU Sinkhorn OT
 import itertools
 import math
+import matplotlib.cm as cm  # for error colormap export
 
 DEBUG_STAGE3B_ROT_WEIGHT = True
 
@@ -87,6 +88,77 @@ def sinkhorn_transport_plan(C: torch.Tensor, eps=0.01, tau=0.1, n_iters=40):
         return P
 
 # --- Utility Functions & Modules ---
+def _nearest_distance_map(
+    target_pts: torch.Tensor, posed_pts: torch.Tensor, batch_size: int = 4096
+) -> torch.Tensor:
+    """
+    For each target point, compute distance to nearest posed point.
+    Uses batching over target points to limit memory.
+    Returns (Nt,) tensor of distances (float).
+    """
+    device = target_pts.device
+    Nt = target_pts.shape[0]
+    posed_pts = posed_pts.detach()
+    dists_out = torch.empty(Nt, device=device)
+    with torch.no_grad():
+        for start in range(0, Nt, batch_size):
+            end = min(start + batch_size, Nt)
+            tgt_batch = target_pts[start:end]  # (b,3)
+            d = torch.cdist(tgt_batch, posed_pts)  # (b, Ns)
+            d_min, _ = d.min(dim=1)
+            dists_out[start:end] = d_min
+    return dists_out
+
+
+def _export_error_colormap_mesh(
+    target_vertices_tensor: torch.Tensor,
+    posed_vertices_tensor: torch.Tensor,
+    out_path: str,
+    faces=None,
+    colormap: str = "plasma",
+    assume_aligned: bool = True,
+):
+    """
+    Builds a mesh (or point cloud if faces=None) whose vertex colors encode
+    nearest distance from each target vertex to the posed (deformed) mesh.
+    """
+    try:
+        import trimesh
+    except ImportError:
+        print("[ErrorMap] trimesh not available; skipping export.")
+        return
+
+    with torch.no_grad():
+        if (
+            assume_aligned
+            and posed_vertices_tensor.shape[0] == target_vertices_tensor.shape[0]
+        ):
+            dists = (posed_vertices_tensor - target_vertices_tensor).norm(dim=1)
+            mode = "aligned L2"
+        else:
+            dists = _nearest_distance_map(target_vertices_tensor, posed_vertices_tensor)
+            mode = "NN"
+        d_cpu = dists.detach().cpu()
+        d_min = float(d_cpu.min())
+        d_max = float(d_cpu.max())
+        if d_max - d_min < 1e-12:
+            norm = torch.zeros_like(d_cpu)
+        else:
+            norm = (d_cpu - d_min) / (d_max - d_min + 1e-8)
+
+    cmap = cm.get_cmap(colormap)
+    colors = (cmap(norm.numpy()) * 255).astype(np.uint8)  # RGBA
+    mesh = trimesh.Trimesh(
+        vertices=target_vertices_tensor.detach().cpu().numpy(),
+        faces=faces if faces is not None else None,
+        process=False,
+    )
+    mesh.visual.vertex_colors = colors
+    mesh.export(out_path)
+    print(
+        f"[ErrorMap] Exported error mesh '{out_path}' "
+        f"(min={d_min:.6f}, max={d_max:.6f})"
+    )
 
 
 def plot_pointcloud(points, save_dir, title="", extra_points=None, matches=None, scale=1.0):
@@ -189,6 +261,23 @@ def compute_normals(vertices, neighborhood_size=16):
     return normals.squeeze(0)  # Remove batch dimension
 
 
+def local_scale(pts: torch.Tensor, k: int = 8):
+    """
+    Simple local scale descriptor: mean distance to k nearest neighbors (excluding self).
+    """
+    if pts.shape[0] == 0:
+        return torch.zeros(0, 1, device=pts.device, dtype=pts.dtype)
+    with torch.no_grad():
+        d2 = torch.cdist(pts, pts)
+        k_eff = min(k, pts.shape[0])
+        knn_d2, _ = torch.topk(d2, k_eff, largest=False)
+        # exclude self (col 0)
+        if k_eff > 1:
+            return knn_d2[:, 1:].mean(1, keepdim=True)
+        else:
+            return torch.zeros(pts.shape[0], 1, device=pts.device, dtype=pts.dtype)
+
+
 def generate_so3_rotations(num_rots, device="cpu", seed=None):
     """
     Generate a set of initial rotations.
@@ -260,39 +349,6 @@ def generate_so3_rotations(num_rots, device="cpu", seed=None):
     return rotations
 
 
-def _debug_check_rot_and_weights(model, rotations, weights):
-    """
-    Checks rotations_6d, rotations (3x3), weight_logits, weights for NaN/Inf.
-    Returns True if all finite, otherwise raises RuntimeError.
-    """
-    with torch.no_grad():
-        issues = []
-        tensors = {
-            "rotations_6d": model.rotations_6d,
-            "rot_mat": rotations,
-            "weight_logits": model.weight_logits,
-            "weights": weights,
-        }
-        for name, t in tensors.items():
-            if not torch.isfinite(t).all():
-                mask = ~torch.isfinite(t)
-                # Flatten indices (show up to first 5)
-                bad_idx = torch.nonzero(mask)[:5]
-                issues.append(
-                    f"{name}: {mask.sum().item()} non-finite entries (first idx: {bad_idx.tolist()})"
-                )
-        if issues:
-            print("[DEBUG-Stage3b] Non-finite detected:\n  " + "\n  ".join(issues))
-            # Print small value stats
-            for name, t in tensors.items():
-                t_safe = torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0)
-                print(
-                    f"[STAT] {name}: min={t_safe.min().item():.3e} max={t_safe.max().item():.3e} mean={t_safe.mean().item():.3e}"
-                )
-            raise RuntimeError("Non-finite in rotations / weights (Stage 3b).")
-    return True
-
-
 def _simple_alignment_metric(src_aligned: torch.Tensor,
                              tgt: torch.Tensor,
                              tau_factor: float = 2.5):
@@ -316,6 +372,53 @@ def _simple_alignment_metric(src_aligned: torch.Tensor,
             "tau": float(tau),
             "score": float(score)
         }
+
+
+def greedy_unique_assignment(P: torch.Tensor, nn_idx: torch.Tensor) -> torch.Tensor:
+    """
+    Enforce near one-to-one matches greedily.
+    P: (S, T_full) row-normalized transport plan (after pruning large costs).
+       Only entries at candidate indices in nn_idx are meaningful (others large-masked).
+    nn_idx: (S, K) candidate target indices (global indexing into columns of P).
+    Returns:
+        final_idx: (S,) chosen target index per source (may contain limited duplicates
+                    if sources > targets or all candidates taken).
+    """
+    device = P.device
+    S, K = nn_idx.shape
+    # Gather candidate probabilities for each row
+    row_probs = P[torch.arange(S, device=device).unsqueeze(1), nn_idx]  # (S,K)
+    # Compute "peakiness" = best - second best probability for ordering
+    top2 = torch.topk(row_probs, k=min(2, K), dim=1).values  # (S, <=2)
+    if top2.shape[1] == 1:
+        peakiness = top2[:, 0]
+    else:
+        peakiness = top2[:, 0] - top2[:, 1]
+    order = torch.argsort(-peakiness)  # most decisive first
+    used = torch.zeros(P.shape[1], dtype=torch.bool, device=device)
+    final_idx = torch.empty(S, dtype=torch.long, device=device)
+
+    for s in order:
+        cands = nn_idx[s]  # (K,)
+        probs = row_probs[s]
+        # Sort candidates for this source by descending probability
+        sort_order = torch.argsort(-probs)
+        assigned = None
+        for j in sort_order:
+            tgt = cands[j].item()
+            if not used[tgt]:
+                assigned = tgt
+                used[tgt] = True
+                break
+        if assigned is None:
+            # All candidates taken -> allow reuse of best
+            assigned = cands[sort_order[0]].item()
+        final_idx[s] = assigned
+    # Revert to original source ordering (order is permutation)
+    inv_order = torch.empty_like(order)
+    inv_order[order] = torch.arange(S, device=device)
+    final_idx = final_idx[inv_order]
+    return final_idx
 
 
 def _fast_rotation_pre_score(src_points: torch.Tensor,
@@ -417,6 +520,7 @@ def multi_run_icp(src_points,
             best_result = result
             best_metrics = metrics
             if best_metrics["median"] < early_thresh:
+                print(f"[ICP] Early accept at init {i+1}/{selected_rots.shape[0]}: {best_metrics}")
                 break  # early accept
 
     # (Optional) Could refine transform on full sets if we used subsampling
@@ -760,9 +864,6 @@ class DeformationModel(nn.Module):
             else:
                 weights = torch.softmax(self.weight_logits, dim=1)
 
-        if getattr(self, "debug_stage3b", False) and self.training and DEBUG_STAGE3B_ROT_WEIGHT:
-            _debug_check_rot_and_weights(self, rotations, weights)
-
         skinned_vertices = apply_skinning(
             self.source_vertices, weights, rotations, self.translations
         )
@@ -902,54 +1003,162 @@ def run_pipeline(
                 with torch.no_grad():
                     if num_keypoints:
                         source_indices = fps(final_verts.detach(), num_keypoints)
-                        target_indices = fps(target_vertices_tensor.detach(), num_keypoints)
+                        target_indices = fps(
+                            target_vertices_tensor.detach(), num_keypoints
+                        )
                         src_subset_now = final_verts[source_indices]
                         cached_target_subset = target_vertices_tensor[target_indices]
                     else:
-                        source_indices = torch.arange(final_verts.shape[0], device=final_verts.device)
+                        source_indices = torch.arange(
+                            final_verts.shape[0], device=final_verts.device
+                        )
                         src_subset_now = final_verts.detach()
                         cached_target_subset = target_vertices_tensor
 
                     cached_source_normals = compute_normals(src_subset_now).detach()
-                    cached_target_normals = compute_normals(cached_target_subset).detach()
+                    cached_target_normals = compute_normals(
+                        cached_target_subset
+                    ).detach()
 
                     source_labels = model.dominant_clusters[source_indices]
                     if num_keypoints:
-                        target_labels = torch.argmax(target_seg_onehot, dim=1)[target_indices]
+                        target_labels = torch.argmax(target_seg_onehot, dim=1)[
+                            target_indices
+                        ]
                     else:
                         target_labels = torch.argmax(target_seg_onehot, dim=1)
 
-                    fixed_targets = torch.zeros_like(src_subset_now)
-
+                    # --- Stage 1 (per-cluster refined matching without segmentation cost) ---
                     if "Stage 1" in stage_name:
+                        # Flag to know if we already have persisted matches
+                        if 'stage1_have_matches' not in locals() or stage1_stable_targets is None \
+                                or (stage1_stable_targets.shape[0] != src_subset_now.shape[0]):
+                            stage1_have_matches = False
+                        else:
+                            stage1_have_matches = True
+
+                        # Allocate container (either previous stable targets or placeholder)
+                        if stage1_have_matches:
+                            new_fixed_targets = stage1_stable_targets.clone()
+                        else:
+                            new_fixed_targets = torch.empty_like(src_subset_now)  # will be fully written
+
                         for k in range(model.num_clusters):
                             part_mask_src = (source_labels == k)
                             part_mask_tgt = (target_labels == k)
+                            if part_mask_src.sum() == 0:
+                                continue
+                            if part_mask_tgt.sum() == 0:
+                                # No target points in this cluster; if first time, fall back to copying current src
+                                if not stage1_have_matches:
+                                    new_fixed_targets[part_mask_src] = src_subset_now[part_mask_src]
+                                continue
 
                             src_part = src_subset_now[part_mask_src]
                             tgt_part = cached_target_subset[part_mask_tgt]
+                            src_norm_part = cached_source_normals[part_mask_src]
+                            tgt_norm_part = cached_target_normals[part_mask_tgt]
 
-                            if src_part.shape[0] == 0 or tgt_part.shape[0] == 0:
-                                if src_part.shape[0] > 0:
-                                    fixed_targets[part_mask_src] = src_part
-                                continue
-
-                            icp_result = multi_run_icp(src_part, tgt_part, num_inits=24)
+                            icp_result = multi_run_icp(src_part, tgt_part, num_inits=24, preselect_k=24)
                             if icp_result is None:
                                 fixed_targets[part_mask_src] = src_part
                                 continue
 
-                            aligned_src_part = icp_result.Xt.squeeze(0)
-                            aligned_src_normals = compute_normals(aligned_src_part)
-                            tgt_part_normals = compute_normals(tgt_part)
+                            src_part = icp_result.Xt.squeeze(0)
+                            src_norm_part = compute_normals(src_part)
 
-                            cost_pos_part = torch.cdist(aligned_src_part, tgt_part) ** 2
-                            cost_normal_part = torch.cdist(aligned_src_normals, tgt_part_normals) ** 2
+                            # # Descriptors (normals + scale)
+                            # src_scale_part = local_scale(src_part)
+                            # tgt_scale_part = local_scale(tgt_part)
+                            # src_desc = torch.cat([src_norm_part, src_scale_part], dim=1)
+                            # tgt_desc = torch.cat([tgt_norm_part, tgt_scale_part], dim=1)
+
+                            # # Costs
+                            # cost_pos    = torch.cdist(src_part, tgt_part)
+                            # cost_normal = torch.cdist(src_norm_part, tgt_norm_part) ** 2
+                            # cost_desc   = torch.cdist(src_desc, tgt_desc) ** 2
+
+                            # def _nr(M):
+                            #     return M / (M.mean(dim=1, keepdim=True) + 1e-8)
+
+                            # C = (
+                            #     _nr(cost_pos)
+                            #     + 0.1 * _nr(cost_normal)
+                            #     + 0.05 * _nr(cost_desc)
+                            # )
+
+                            # C_full = _nr(cost_pos) * 0.75 + 0.25 * _nr(cost_normal) + 0.05 * _nr(cost_desc)
+
+                            # # Candidate pruning
+                            # k_prune = min(64, tgt_part.shape[0])
+                            # if k_prune < 1:
+                            #     if not stage1_have_matches:
+                            #         new_fixed_targets[part_mask_src] = src_part
+                            #     continue
+                            # _, nn_idx = torch.topk(cost_pos, k_prune, largest=False)
+                            # large = C_full.max().detach() + 10.0
+                            # C = torch.full_like(C_full, large)
+                            # row_ids = torch.arange(C.shape[0], device=C.device).unsqueeze(1).expand(-1, k_prune)
+                            # C[row_ids, nn_idx] = C_full[row_ids, nn_idx]
+
+                            # P = sinkhorn_transport_plan(
+                            #     C, eps=0.01, tau=0.05, n_iters=50
+                            # )
+                            # prelim_idx = greedy_unique_assignment(P, nn_idx)
+                            cost_pos_part = torch.cdist(src_part, tgt_part) ** 2
+                            cost_normal_part = (
+                                torch.cdist(src_norm_part, tgt_norm_part) ** 2
+                            )
                             C_part = 0.75 * cost_pos_part + 0.25 * cost_normal_part
 
-                            P = sinkhorn_transport_plan(C_part, eps=0.01, tau=0.05, n_iters=40)
+                            P = sinkhorn_transport_plan(
+                                C_part, eps=0.01, tau=0.05, n_iters=40
+                                # C_part,
+                                # eps=0.003,
+                                # tau=10.0,
+                                # n_iters=50,
+                            )
                             matched_indices_part = torch.argmax(P, dim=1)
-                            fixed_targets[part_mask_src] = tgt_part[matched_indices_part]
+                            new_fixed_targets[part_mask_src] = tgt_part[
+                                matched_indices_part
+                            ]
+
+                            # # Optional mutual refinement
+                            # unique_tgt, inverse = torch.unique(prelim_idx, return_inverse=True)
+                            # tgt_subset = tgt_part[unique_tgt]
+                            # dist_t2s = torch.cdist(tgt_subset, src_part)
+                            # k_back = min(4, src_part.shape[0])
+                            # _, src_rank = torch.topk(dist_t2s, k_back, largest=False)
+                            # mutual_mask = torch.zeros_like(prelim_idx, dtype=torch.bool)
+                            # for t_i in range(unique_tgt.shape[0]):
+                            #     allowed_sources = src_rank[t_i]
+                            #     src_indices_part = torch.nonzero(inverse == t_i).squeeze(1)
+                            #     for s_local in src_indices_part:
+                            #         if (allowed_sources == s_local).any():
+                            #             mutual_mask[s_local] = True
+                            # # Fallback to nearest positional candidate
+                            # fallback_idx = nn_idx[torch.arange(nn_idx.shape[0]), 0]
+                            # final_idx_part = torch.where(mutual_mask, prelim_idx, fallback_idx)
+                            # new_matches = tgt_part[final_idx_part]
+
+                            # if stage1_have_matches:
+                            #     # Persistence (compare to previous)
+                            #     prev_part = stage1_stable_targets[part_mask_src]
+                            #     prev_cost = (src_part - prev_part).pow(2).sum(1)
+                            #     new_cost  = (src_part - new_matches).pow(2).sum(1)
+                            #     # Allow replacement if strictly better OR previous was identity/self (very low prev_cost)
+                            #     # Treat tiny prev_cost as non-locked
+                            #     tiny = (prev_cost < 1e-8)
+                            #     improve_mask = (new_cost + 1e-7 < prev_cost) | tiny
+                            #     updated_part = torch.where(improve_mask.unsqueeze(1), new_matches, prev_part)
+                            #     new_fixed_targets[part_mask_src] = updated_part
+                            # else:
+                            #     # First-ever matching pass: accept all matches directly
+                            #     new_fixed_targets[part_mask_src] = new_matches
+
+                        stage1_stable_targets = new_fixed_targets
+                        fixed_targets = stage1_stable_targets
+                        stage1_have_matches = True
                     else:
                         # (Unchanged global OT branch)
                         progress = step / total_steps if total_steps > 0 else 1
@@ -970,36 +1179,35 @@ def run_pipeline(
 
                         target_seg_subset = target_seg_onehot[target_indices] if num_keypoints else target_seg_onehot
 
-                        # 2. Local shape descriptor (normal + local scale)
-                        def local_scale(pts, k=8):
-                            # crude: mean distance to k nearest (including self)
-                            d2 = torch.cdist(pts, pts)
-                            knn_d2, _ = torch.topk(d2, k, largest=False)
-                            return knn_d2[:, 1:].mean(1, keepdim=True)  # exclude self
                         src_scale = local_scale(src_subset_now)
                         tgt_scale = local_scale(cached_target_subset)
-                        # Normals already cached; concatenate
                         src_desc = torch.cat([cached_source_normals, src_scale], dim=1)
                         tgt_desc = torch.cat([cached_target_normals, tgt_scale], dim=1)
 
-                        cost_pos    = torch.cdist(src_subset_now, cached_target_subset)  # (no square yet)
-                        cost_normal = torch.cdist(cached_source_normals, cached_target_normals) ** 2
-                        cost_seg    = torch.cdist(source_seg_for_cost, target_seg_subset) ** 2
-                        cost_desc   = torch.cdist(src_desc, tgt_desc) ** 2
+                        cost_pos = torch.cdist(src_subset_now, cached_target_subset)
+                        cost_normal = (
+                            torch.cdist(cached_source_normals, cached_target_normals)
+                            ** 2
+                        )
+                        cost_seg = (
+                            torch.cdist(source_seg_for_cost, target_seg_subset) ** 2
+                        )
+                        cost_desc = torch.cdist(src_desc, tgt_desc) ** 2
 
-                        # Normalize each cost (row-wise) to reduce dominance
                         def normalize_rows(M):
-                            M = M / (M.mean(dim=1, keepdim=True) + 1e-8)
-                            return M
-                        cost_pos_n    = normalize_rows(cost_pos)
-                        cost_normal_n = normalize_rows(cost_normal)
-                        cost_seg_n    = normalize_rows(cost_seg)
-                        cost_desc_n   = normalize_rows(cost_desc)
+                            return M / (M.mean(dim=1, keepdim=True) + 1e-8)
 
-                        C_full = (cost_pos_n
-                                  + 0.1 * cost_normal_n
-                                  + lambda_seg * cost_seg_n
-                                  + 0.05 * cost_desc_n)
+                        cost_pos_n = normalize_rows(cost_pos)
+                        cost_normal_n = normalize_rows(cost_normal)
+                        cost_seg_n = normalize_rows(cost_seg)
+                        cost_desc_n = normalize_rows(cost_desc)
+
+                        C_full = (
+                            cost_pos_n
+                            + 0.1 * cost_normal_n
+                            + lambda_seg * cost_seg_n
+                            + 0.05 * cost_desc_n
+                        )
 
                         # 3. Candidate pruning (k nearest in Euclidean space)
                         k_prune = 64
@@ -1014,14 +1222,12 @@ def run_pipeline(
                         # 4. Sharper Sinkhorn on pruned matrix
                         P = sinkhorn_transport_plan(C, eps=0.003, tau=0.15, n_iters=60)
 
-                        # 5. Argmax preliminary matches
-                        prelim_idx = torch.argmax(P, dim=1)
+                        # 5. Greedy uniqueness-aware assignment instead of plain argmax
+                        prelim_idx = greedy_unique_assignment(P, nn_idx)
 
                         # 6. Mutual nearest consistency (position based within candidate set)
                         # For each chosen target, check if source is among that target's top-k_back sources
                         k_back = 4
-                        # Gather distances column-wise only for candidate pairs (use cost_pos)
-                        col_dists = cost_pos[:, prelim_idx]  # (Ns,)
                         # Compute reverse: for efficiency approximate by ensuring chosen target is within source's k_prune set AND
                         # source is within its k_back in that target's perspective.
                         # Build target->source distance matrix on-the-fly for subset of chosen targets
@@ -1130,6 +1336,17 @@ def run_pipeline(
         if source_faces is not None:
             mesh = trimesh.Trimesh(vertices=posed.detach().cpu().numpy(), faces=source_faces)
             mesh.export(os.path.join(log_dir, f"{stage_name.replace(' ', '_')}_mesh.obj"))
+            # --- New: per-target error colormap export ---
+            error_mesh_path = os.path.join(
+                log_dir, f"{stage_name.replace(' ', '_')}_error_map.ply"
+            )
+            _export_error_colormap_mesh(
+                target_vertices_tensor=target_vertices_tensor,
+                posed_vertices_tensor=posed,
+                out_path=error_mesh_path,
+                faces=source_faces if source_faces is not None else None,
+                colormap="plasma",
+            )
         else:
             np.save(
                 os.path.join(log_dir, f"{stage_name.replace(' ', '_')}_points.npy"),
@@ -1137,18 +1354,22 @@ def run_pipeline(
             )
 
     # --- 1. Rigid Core Fitting ---
-    optimizer = optim.Adam([model.rotations_6d, model.translations], lr=1e-2)
+    optimizer = optim.Adam([model.rotations_6d, model.translations], lr=5e-3)
     run_stage(
-        "Stage 1: Rigid Core Fitting", 500, optimizer, target_vertices_tensor,
-        matching_interval=(10, 60),   # start every 10 steps, relax to every 60
+        "Stage 1: Rigid Core Fitting",
+        500,
+        optimizer,
+        target_vertices_tensor,
+        matching_interval=(10, 60),  # start every 10 steps, relax to every 60
         adaptive_matching=True,
         early_stop=True,
         early_metric="data_fit",
         early_patience=70,
-        early_min_delta=5e-5,
-        early_warmup=60,
-        num_keypoints=2048,
-        lambda_seg_schedule=(0.0, 0.0)
+        # early_min_delta=5e-5,
+        early_min_delta=1e-5,
+        early_warmup=300,
+        num_keypoints=4096,
+        lambda_seg_schedule=(0.0, 0.0),
     )
 
     # --- 2. Skin-weight Refinement ---
@@ -1240,7 +1461,7 @@ if __name__ == "__main__":
         for name in part_names
     }
 
-    sample_name = "sample_1"
+    sample_name = "sample_5"
     ref_obj_mesh = trimesh.load(
         f"/NAS/spa176/skeleton-free-pose-transfer/demo/smpl_pose_0/{sample_name}.obj",
         process=False,
@@ -1262,7 +1483,7 @@ if __name__ == "__main__":
     log_dir = "fit_pointcloud_logs"
     exp_dir = f"smpl_skinning_ot"
     exp_id = sample_name
-    exp_sub_dir = f"exp_{exp_id}_7"
+    exp_sub_dir = f"exp_{exp_id}_4"
     log_dir = os.path.join(log_dir, exp_dir, exp_sub_dir)
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)

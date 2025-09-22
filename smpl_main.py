@@ -1483,7 +1483,7 @@ if __name__ == "__main__":
     log_dir = "fit_pointcloud_logs"
     exp_dir = f"smpl_skinning_ot"
     exp_id = sample_name
-    exp_sub_dir = f"exp_{exp_id}_6"
+    exp_sub_dir = f"exp_{exp_id}_8"
     log_dir = os.path.join(log_dir, exp_dir, exp_sub_dir)
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
@@ -1534,30 +1534,89 @@ if __name__ == "__main__":
     #     lr=5e-3,
     # )
 
-    from rig_reg_deform_graph_adapted import run_pipeline_deform_graph
+    # from rig_reg_deform_graph_adapted import run_pipeline_deform_graph
 
-    final_posed_vertices = run_pipeline_deform_graph(
+    # final_posed_vertices = run_pipeline_deform_graph(
+    #     source_vertices=source_verts,
+    #     source_faces=source_faces,          # kept for mesh export
+    #     target_vertices=target_verts,
+    #     target_segmentation=vert_seg,
+    #     log_dir=log_dir,                    # HTML plots + meshes land here
+    #     visual_scale=1.0,
+    #     source_segmentation=vert_seg,     # optional; enables per-part balancing in Stage 1
+    #     # your existing knobs still work:
+    #     nodes_per_part="auto",
+    #     k_skin=8,
+    #     sinkhorn_eps=0.05,                  # base value (stage schedule overrides internally)
+    #     sinkhorn_iters=60,
+    #     beta_norm=0.2,
+    #     lambda_seam=0.1,
+    #     lambda_arap=0.05,
+    #     lambda_prior=0.01,
+    #     prior_mode="hinge",
+    #     iters=600,
+    #     lr=5e-3,
+    # )
+
+    from rig_reg_deform_graph_merged import run_merged_pipeline
+
+    up_hint = np.array([0, 1, 0], dtype=np.float64)
+    front_hint = np.array([0, 0, 1], dtype=np.float64)
+
+    final_posed_vertices = run_merged_pipeline(
         source_vertices=source_verts,
-        source_faces=source_faces,          # kept for mesh export
+        source_faces=source_faces,
         target_vertices=target_verts,
         target_segmentation=vert_seg,
-        log_dir=log_dir,                    # HTML plots + meshes land here
-        visual_scale=1.0,
-        source_segmentation=vert_seg,     # optional; enables per-part balancing in Stage 1
+        # source_segmentation=vert_seg,
+        part_indices=part_indices,
+        log_dir=log_dir,
         # your existing knobs still work:
-        nodes_per_part="auto",
-        k_skin=8,
-        sinkhorn_eps=0.05,                  # base value (stage schedule overrides internally)
-        sinkhorn_iters=60,
-        beta_norm=0.2,
-        lambda_seam=0.1,
-        lambda_arap=0.05,
-        lambda_prior=0.01,
-        prior_mode="hinge",
-        iters=600,
-        lr=5e-3,
+        deform_kwargs=dict(
+            visual_scale=1.0,
+            nodes_per_part="auto",
+            k_skin=8,
+            sinkhorn_eps=0.05,  # base value (stage schedule overrides internally)
+            sinkhorn_iters=60,
+            beta_norm=0.2,
+            lambda_seam=0.1,
+            lambda_arap=0.05,
+            lambda_prior=0.01,
+            prior_mode="hinge",
+            iters=600,
+            lr=5e-3,
+        ),
+        rigid_params=dict(
+            outer_iters=15,
+            keep_ratio_schedule=[0.7, 0.8, 0.85, 0.9],
+            # smooth_lambda=20.0,
+            # boundary_gamma=80.0,
+            # prior_mu=10.0,
+            smooth_lambda=0.0,
+            boundary_gamma=1.0,
+            prior_mu=1.0,
+            # smooth_lambda=0.0,
+            # boundary_gamma=0.0,
+            # prior_mu=0.0,
+            lm_damp=1e-6,
+            verbose=True,
+            export_meshes=True,
+            log_dir=log_dir,
+            source_faces=source_faces,
+            part_indices=part_indices,
+            init_mode="graph",
+            root_part_id="root",
+            # root_part_id=0,
+            front_hint=front_hint,
+            up_hint=up_hint,
+            z_mode="seam_centroid_to_centroid_direction",
+            # p2p_parts=["left_lower_arm", "right_lower_arm"],
+            # debug_parts=["left_lower_arm", "right_lower_arm"],
+            # debug_parts=["head_neck"],
+            # debug_plot=True,
+            # flip_normals=["left_lower_arm", "right_lower_arm"],
+        ),  # use defaults
     )
-
 
     plot_pointcloud(
         torch.from_numpy(final_posed_vertices),

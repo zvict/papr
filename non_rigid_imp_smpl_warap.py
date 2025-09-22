@@ -1154,6 +1154,7 @@ def modified_icp_one(
     teaser_solver=None,
     num_icp_inits=1,
     stop_icp_after=10000,
+    temp_schedule=[],
 ):
     if save_logs:
         save_path = os.path.join(
@@ -1200,6 +1201,11 @@ def modified_icp_one(
             save_path = save_path[:-1] + f"_maskFreq{mask_freq}/"
         if teaser_solver is not None:
             save_path = save_path[:-1] + f"_TS/"
+        if len(temp_schedule):
+            save_path = save_path[:-1] + f"_tempSchedule"
+            for tIter, temp in temp_schedule:
+                save_path += f"{tIter}_{temp}"
+            save_path += "/"
         # if use_arap:
         #     if joint_arap:
         #         save_path = save_path[:-1] + f"_joint_arap{arap_w}_k{smooth_knn}/"
@@ -1305,6 +1311,10 @@ def modified_icp_one(
                 c_schedule = c_schedule[1:]
                 tqdm.tqdm.write(f"Upating robustness constant to index {cur_c_seg_idx}")
             cur_c = robust_c[cur_c_seg_idx]
+        if len(temp_schedule) and it >= temp_schedule[0][0]:
+            model.temperature = temp_schedule[0][1]
+            temp_schedule = temp_schedule[1:]
+            tqdm.tqdm.write(f"Updating model temperature to {model.temperature}")
         src_transformed = []
         src_transformed_dict = {}
         tgt_nn = []
@@ -2196,13 +2206,13 @@ joint_k = 1
 # temperature = 1.0
 # temperature = 0.4
 # temperature = 5.0
-temperature = 5.0
-# temperature = 25.0
+# temperature = 10.0
+temperature = 7.5
 # max_freq = 1
 max_freq = 1
 mask_freq = 4
 
-teaser_solver = get_teaser_solver(0.05)
+# teaser_solver = get_teaser_solver(0.05)
 
 # imp_model = PointwiseTransformPartNet(
 #     base_channels=64, max_freq=max_freq, temperature=temperature, mask_freq=mask_freq, num_layers=1
@@ -2359,7 +2369,7 @@ if TRAIN_ICP_MODEL:
     for time_step in tqdm.tqdm(range(total_time_steps)):
 
         # cur_iterations = 800 if time_step == 0 else 500
-        cur_min_iter = 200 if time_step == 0 else 10
+        cur_min_iter = 500 if time_step == 0 else 10
         save_log = True if time_step == 0 else False
         cur_src_kps = src_kps
         # cur_src_kps = [src_keypoint[time_step] for src_keypoint in src_keypoints]
@@ -2370,7 +2380,7 @@ if TRAIN_ICP_MODEL:
             correspondence = None
 
         # print(f"Step {time_step}, ratios: {[src_volume_ratio[time_step] for src_volume_ratio in src_volume_ratios]}")
-        smooth_knn = 10
+        smooth_knn = 5
         (
             imp_models,
             src_transformed,
@@ -2383,8 +2393,8 @@ if TRAIN_ICP_MODEL:
             cur_src_kps,
             imp_model,
             log_dir,
-            # iterations=600,
-            iterations=400,
+            iterations=800,
+            # iterations=502,
             # num_segments=max_freq,
             # num_segments=1,
             loss_mode="chamfer",
@@ -2395,8 +2405,8 @@ if TRAIN_ICP_MODEL:
             # loss_type="p2p"
             correspondence=correspondence,
             # lrt=5e-3,
-            lrt=7.5e-3,
-            # lrt=1e-2,
+            # lrt=7.5e-3,
+            lrt=1e-2,
             # src_iter=src_iter,
             use_arap=True,
             # smooth_knn=10,
@@ -2448,9 +2458,10 @@ if TRAIN_ICP_MODEL:
                 # "root",
                 # "head_neck",
             },
-            num_icp_inits=2,
-            stop_icp_after=200,
+            num_icp_inits=3,
+            stop_icp_after=300,
             # teaser_solver=teaser_solver,
+            temp_schedule=[(300, 3.0), (375, 1.0), (450, 0.5)],
         )
 
         # if time_step == 0:

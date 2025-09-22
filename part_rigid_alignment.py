@@ -28,6 +28,7 @@ Notes:
 
 import os
 import shutil
+from typing import Any, List, Tuple
 import numpy as np
 import trimesh
 
@@ -460,6 +461,261 @@ def _fit_plane_normal(P):
     return n
 
 
+def _dominant_axis_in_plane(X, z, w=None, center=None):
+    """Return dominant direction in plane orthogonal to z along with planar eigenvalues."""
+    X = np.asarray(X)
+    if center is None:
+        center = robust_centroid(X)
+    P = np.eye(3) - np.outer(z, z)  # projector onto plane orthogonal to z
+    Xc = X - center
+    Xp = Xc @ P.T
+    if w is None:
+        C = Xp.T @ Xp
+    else:
+        w = w.reshape(-1, 1)
+        sw = float(w.sum()) + 1e-12
+        C = (Xp * w).T @ Xp / sw
+    vals, vecs = np.linalg.eigh(C)
+    x = vecs[:, -1]
+    x /= np.linalg.norm(x) + 1e-12
+    lam1 = vals[-1]
+    lam2 = vals[-2] if vals.shape[0] >= 2 else 0.0
+    return x, (lam1, lam2)
+
+
+
+# --------------------------------------------------------------
+# Robust blended frame recipe (shape-first with graph anchoring)
+# --------------------------------------------------------------
+def recipe_blended_frames(
+        parts, 
+        part_graph, 
+        root=None,
+        up_hint=None,
+        frontal_hint=None, 
+        anchors=None, 
+        params=None
+    ) -> dict:
+    """
+    Build per-part frames using a robust *shape + graph* recipe.
+
+    Goal:
+      - Pose-invariant for identical shapes under different poses (use PCA when anisotropy is strong).
+      - Flip-resistant across symmetric/round parts by using graph seam cues to fix axis *sign* and in-plane *spin*.
+
+    Inputs:
+      parts: dict[part_id] -> { "points": (N,3), optional "normals": (N,3), optional "centroid": (3,) }
+      part_graph: iterable of (i, j, w) edges (w is unused here, but allowed)
+      root: optional root part id; if None, pick the highest-degree node
+      anchors: optional dict[(i,j)] -> (M,3) seam points (in *part i* coordinates) used to orient child w.r.t parent
+      params: optional dict of hyper-parameters:
+        - tau_aniso: float, anisotropy threshold for trusting PCA long axis (default 1.3)
+        - prefer_parent_for_spin: bool, if True align x with parent seam projection when available (default True)
+        - verbose: bool
+
+    Returns:
+      F: dict[part_id] -> 3x3 rotation matrix with columns [x, y, z]
+    """
+    import numpy as _np
+    from collections import deque as _deque
+
+    if params is None: params = {}
+    tau_aniso = float(params.get("tau_aniso", 1.3))
+    prefer_parent_for_spin = bool(params.get("prefer_parent_for_spin", True))
+    verbose = bool(params.get("verbose", False))
+
+    keys = list(parts.keys())
+    if len(keys) == 0:
+        return {}
+
+    # Build adjacency (undirected)
+    nbrs = {k: [] for k in keys}
+    deg = {k: 0 for k in keys}
+    for (i, j, *rest) in part_graph:
+        if i in nbrs and j in nbrs:
+            nbrs[i].append(j); nbrs[j].append(i)
+            deg[i] += 1; deg[j] += 1
+
+    # Pick a root if none given: highest degree (fallback to first key)
+    if root is None:
+        root = max(deg.items(), key=lambda kv: (kv[1], str(kv[0])))[0] if len(deg)>0 else keys[0]
+    if verbose:
+        print(f"[recipe_blended_frames] root = {root}")
+
+    # Centroids
+    cent = {k: (parts[k].get("centroid") if "centroid" in parts[k] else robust_centroid(_np.asarray(parts[k]["points"])))
+            for k in keys}
+
+    # Precompute PCA eigens for each part
+    evals = {}
+    evecs = {}
+    for k in keys:
+        X = _np.asarray(parts[k]["points"], dtype=_np.float64)
+        Xc = X - cent[k]
+        C = Xc.T @ Xc
+        w, V = _np.linalg.eigh(C)  # ascending
+        # if k == root:
+        #     if up_hint is not None:
+        #         if np.dot(V[:, -1], up_hint) < 0:
+        #             V[:, -1] = -V[:, -1]
+
+        #     # Handle frontal_hint: use it to guide x direction
+        #     if frontal_hint is not None:
+        #         # Project frontal_hint onto the plane perpendicular to z
+        #         frontal_proj = frontal_hint - np.dot(frontal_hint, V[:, -1]) * V[:, -1]
+        #         frontal_proj_norm = np.linalg.norm(frontal_proj)
+                
+        #         # Check if projection is degenerate (frontal_hint is nearly parallel to z)
+        #         if frontal_proj_norm > 1e-6:
+        #             V[:, 0] = frontal_proj / frontal_proj_norm
+        #         else:
+        #             # Use frontal_hint directly as x (and orthogonalize later)
+        #             V[:, 0] = frontal_hint / (np.linalg.norm(frontal_hint) + 1e-12)
+
+        evals[k] = w
+        evecs[k] = V  # columns
+    def _anisotropy(vals):
+        # vals ascending
+        l1, l2, l3 = float(vals[-1]), float(vals[-2]), float(vals[-3]) if vals.shape[0]>=3 else (float(vals[-1]), float(vals[-2]), 0.0)
+        return (l1/(l2+1e-12), l2/(l3+1e-12))
+
+    def _normalize(v):
+        n = _np.linalg.norm(v)
+        return v / (n + 1e-12)
+
+    def _proj_plane(u, z):
+        return u - (u @ z) * z
+
+    def _seam_vec(i, j):
+        """Return vector at part i pointing toward neighbor j (using anchors if available, else centroid-to-centroid)."""
+        if anchors is not None and (i, j) in anchors:
+            s_ij = _seam_center(anchors[(i, j)])
+            return _normalize(s_ij - cent[i])
+        else:
+            v = cent[j] - cent[i]
+            return _normalize(v) if _np.linalg.norm(v) > 1e-12 else v
+
+    def _seam_quality(i, j):
+        """A simple seam quality score for weighting; higher is better."""
+        if anchors is not None and (i, j) in anchors:
+            Bij = _np.asarray(anchors[(i, j)])
+            # compactness via planar spread around seam plane
+            if Bij.shape[0] >= 8:
+                Pc = Bij - Bij.mean(axis=0)
+                C = Pc.T @ Pc
+                vals, _ = _np.linalg.eigh(C)  # ascending
+                # smaller smallest eigenvalue => tighter seam -> higher quality
+                return float(Bij.shape[0]) / (1.0 + float(vals[0]))
+            else:
+                return float(Bij.shape[0])
+        else:
+            # fallback: inverse distance weight from centroids
+            v = cent[j] - cent[i]
+            d = float(_np.linalg.norm(v))
+            return 1.0 / (1e-6 + d)
+
+    # Output frames
+    F = {}
+
+    # Root: choose z then x using local rules (no parent yet)
+    a1_root, a2_root = _anisotropy(evals[root])
+    if a1_root > tau_aniso:
+        z_root = evecs[root][:, -1]
+    else:
+        # use average of neighbor seams
+        acc = _np.zeros(3, dtype=_np.float64)
+        wsum = 0.0
+        for j in nbrs[root]:
+            wq = _seam_quality(root, j)
+            acc += wq * _seam_vec(root, j); wsum += wq
+        z_root = _normalize(acc) if wsum>1e-12 else evecs[root][:, -1]
+    # x: prefer dominant in-plane PCA unless ambiguous; else best neighbor seam
+    x_root, (lam1p, lam2p) = _dominant_axis_in_plane(parts[root]["points"], z_root, center=cent[root])
+    if lam1p - lam2p < 1e-8:  # ambiguous
+        # use best-quality neighbor seam projected
+        best = None; best_w = -_np.inf
+        for j in nbrs[root]:
+            wq = _seam_quality(root, j)
+            cand = _proj_plane(_seam_vec(root, j), z_root)
+            if _np.linalg.norm(cand) < 1e-8: continue
+            if wq > best_w:
+                best_w = wq; best = cand
+        if best is not None and _np.linalg.norm(best) > 1e-8:
+            x_root = _normalize(best)
+    y_root = _normalize(_np.cross(z_root, x_root))
+    x_root = _normalize(_np.cross(y_root, z_root))
+    F[root] = _np.stack([x_root, y_root, z_root], axis=1)
+
+    # BFS outwards, fixing sign and spin using parent seams
+    q = _deque([root])
+    visited = {root}
+    while q:
+        i = q.popleft()
+        for j in nbrs[i]:
+            if j in visited:
+                continue
+
+            # Step 1) primary axis z_j
+            a1, a2 = _anisotropy(evals[j])
+            if a1 > tau_aniso:
+                z_j = evecs[j][:, -1]
+            else:
+                # weighted sum of seams
+                acc = _np.zeros(3, dtype=_np.float64)
+                wsum = 0.0
+                for k2 in nbrs[j]:
+                    wq = _seam_quality(j, k2)
+                    acc += wq * _seam_vec(j, k2); wsum += wq
+                z_j = _normalize(acc) if wsum>1e-12 else evecs[j][:, -1]
+
+            # Step 2) in-plane cue u: parent seam projected preferred
+            sp = _seam_vec(j, i)  # seam direction from j toward its parent i, in j's coords
+            u = _proj_plane(sp, z_j) if prefer_parent_for_spin else None
+
+            # fallback to e2 if planar anisotropy is sufficient
+            if u is None or _np.linalg.norm(u) < 1e-8:
+                x_e2, (lam1p, lam2p) = _dominant_axis_in_plane(parts[j]["points"], z_j, center=cent[j])
+                if lam1p - lam2p > 1e-8:
+                    u = x_e2
+            # final fallback: best other seam
+            if u is None or _np.linalg.norm(u) < 1e-8:
+                best = None; best_w = -_np.inf
+                for k2 in nbrs[j]:
+                    if k2 == i: continue
+                    wq = _seam_quality(j, k2)
+                    cand = _proj_plane(_seam_vec(j, k2), z_j)
+                    if _np.linalg.norm(cand) < 1e-8: continue
+                    if wq > best_w: best_w = wq; best = cand
+                if best is not None: u = best
+
+            if u is None or _np.linalg.norm(u) < 1e-8:
+                # last resort: take parent's x projected
+                x_parent = F[i][:, 0]
+                u = _proj_plane(x_parent, z_j)
+
+            x_j = _normalize(u)
+            y_j = _normalize(_np.cross(z_j, x_j))
+            x_j = _normalize(_np.cross(y_j, z_j))
+
+            # Step 3) sign disambiguation w.r.t parent seam
+            # Ensure +Z roughly points away from parent toward the rest of j
+            if _np.dot(z_j, _seam_vec(j, i)) < 0.0:
+                z_j = -z_j; x_j = -x_j  # keep right-handed; y stays
+                y_j = _normalize(_np.cross(z_j, x_j))
+                x_j = _normalize(_np.cross(y_j, z_j))
+
+            # Optionally align x spin so that its projection is concordant with parent seam projection
+            sp_proj = _proj_plane(_seam_vec(j, i), z_j)
+            if _np.linalg.norm(sp_proj) > 1e-8 and _np.dot(x_j, sp_proj) < 0.0:
+                x_j = -x_j; y_j = -y_j
+
+            F[j] = _np.stack([x_j, y_j, z_j], axis=1)
+            visited.add(j)
+            q.append(j)
+
+    return F
+
+
 def graph_consistent_frames(
     parts,
     part_graph,
@@ -468,10 +724,17 @@ def graph_consistent_frames(
     up_hint=None,
     front_hint=None,
     z_mode="centroid",
+    x_mode="distal_centroid",
 ):
     """
     Build per-part frames that are consistent across the adjacency graph by propagating
-    orientation from a root and resolving twist using parent x-axis projections and (optional) seam normals.
+    orientation from a root and resolving twist using graph-aware cues.
+
+    z_mode controls the outward axis choice.
+    x_mode controls the in-plane ("front") axis. Supported options:
+        "distal_centroid" -> direction to distal neighbor centroids.
+        "distal_seam"     -> direction between seam centers (requires anchors).
+        other values fall back to shape and parent continuity only.
 
     Returns: dict part_id -> 3x3 rotation (columns [x,y,z]).
     """
@@ -582,17 +845,93 @@ def graph_consistent_frames(
             else:
                 z_j = rawF[j][:, 2]
 
-            # x_j: project parent's x onto plane orthogonal to z_j; fallback to seam normal or raw x
+            # x_j: blend graph-aware, geometric, and continuity cues in the plane orthogonal to z_j
             Pperp = np.eye(3) - np.outer(z_j, z_j)
-            x_proj = Pperp @ Xi
-            if np.linalg.norm(x_proj) < 1e-6:
-                # if anchors is not None and (i, j) in seam_normal:
-                #     x_j = Pperp @ seam_normal[(i, j)]
-                # else:
-                x_j = Pperp @ rawF[j][:, 0]
+            x_parent_proj = Pperp @ Xi
+            n_parent = np.linalg.norm(x_parent_proj)
+            if n_parent > 1e-12:
+                x_parent_proj /= n_parent
+
+            x_candidates = []  # list of (vector, weight)
+
+            # Distal neighbor cues (graph information)
+            # if x_mode in ("distal_centroid", "distal_seam"):
+            #     distal_dirs = []
+            #     if x_mode == "distal_centroid":
+            #         for k2 in nbrs.get(j, []):
+            #             if k2 == i:
+            #                 continue
+            #             vdst = cent[k2] - cent[j]
+            #             if np.linalg.norm(vdst) > 1e-12:
+            #                 distal_dirs.append(vdst)
+            #     elif x_mode == "distal_seam" and anchors is not None:
+            #         s_parent = _seam_center(anchors[(i, j)]) if (i, j) in anchors else cent[i]
+            #         distal_seams = []
+            #         for k2 in nbrs.get(j, []):
+            #             if k2 == i:
+            #                 continue
+            #             if (j, k2) in anchors:
+            #                 distal_seams.append(_seam_center(anchors[(j, k2)]))
+            #         if len(distal_seams) > 0:
+            #             s_dst = np.mean(np.stack(distal_seams, axis=0), axis=0)
+            #             vdst = s_dst - s_parent
+            #             if np.linalg.norm(vdst) > 1e-12:
+            #                 distal_dirs.append(vdst)
+            #     if len(distal_dirs) > 0:
+            #         vbar = np.mean(np.stack(distal_dirs, axis=0), axis=0)
+            #         x_d = Pperp @ vbar
+            #         if np.linalg.norm(x_d) > 1e-6:
+            #             x_d /= np.linalg.norm(x_d)
+            #             x_candidates.append((x_d, 1.0))
+
+            # Geometric cue: dominant in-plane axis (optionally seam-weighted for leaves)
+            is_leaf = len(nbrs.get(j, [])) <= 1
+            w_plane = None
+            if is_leaf and anchors is not None and (i, j) in anchors:
+                Xj = parts[j]["points"]
+                d = _nn_distances_to_set(Xj, anchors[(i, j)])
+                q50, q90 = np.quantile(d, 0.5), np.quantile(d, 0.9)
+                denom = max(q90 - q50, 1e-6)
+                w_plane = np.clip((d - q50) / denom, 0.0, 1.0) ** 2
+            x_geo, (lam1, lam2) = _dominant_axis_in_plane(
+                parts[j]["points"], z_j, w=w_plane, center=cent[j]
+            )
+            anisotropy = lam1 / (lam2 + 1e-12)
+            thr = 1.01 if is_leaf else 1.05
+            if np.isfinite(anisotropy) and anisotropy > thr:
+                # x_candidates.append((x_geo, 1.25 if is_leaf else 1.0))
+                x_candidates.append((x_geo, 1.0 if is_leaf else 1.0))
             else:
-                x_j = x_proj
+                print(f"### Part {j} low anisotropy {anisotropy:.3f}, skipping geometric x cue.")
+                x_candidates.append((x_parent_proj, 1.0))
+
+            # # Continuity cue: parent's x projection
+            # if n_parent > 1e-12:
+            #     x_candidates.append((x_parent_proj, 0.5))
+
+            # Blend candidates
+            if len(x_candidates) == 0:
+                if anchors is not None and (i, j) in seam_normal:
+                    x_tmp = Pperp @ seam_normal[(i, j)]
+                    if np.linalg.norm(x_tmp) > 1e-6:
+                        x_j = x_tmp
+                    else:
+                        x_j = Pperp @ rawF[j][:, 0]
+                else:
+                    x_j = Pperp @ rawF[j][:, 0]
+            else:
+                acc = np.zeros(3, dtype=np.float64)
+                for vec, weight in x_candidates:
+                    acc += float(weight) * vec
+                x_j = acc
+
+            if np.linalg.norm(x_j) < 1e-8:
+                x_j = Pperp @ rawF[j][:, 0]
             x_j /= np.linalg.norm(x_j) + 1e-12
+
+            # if n_parent > 1e-12 and np.dot(x_j, x_parent_proj) < 0:
+            #     x_j = -x_j
+
             y_j = np.cross(z_j, x_j)
             y_j /= np.linalg.norm(y_j) + 1e-12
             x_j = np.cross(y_j, z_j)
@@ -630,6 +969,7 @@ DEFAULTS = dict(
     init_mode="graph",  # or "graph"
     root_part_id="root",
     z_mode="centroid",
+    x_mode="distal_centroid",
 )
 
 def build_data_terms(source_parts, target_parts, states, keep_ratio, p2p_parts=None, flip_normals=None):
@@ -738,25 +1078,44 @@ def estimate_part_rigid_transforms(source_parts, target_parts, part_graph, sourc
     up_hint = cfg.get("up_hint", None)
     front_hint = cfg.get("front_hint", None)
     z_mode = cfg.get("z_mode", "centroid")
+    x_mode = cfg.get("x_mode", "distal_centroid")
 
     if init_mode == "graph":
-        Fsrc = graph_consistent_frames(
-            source_parts,
-            part_graph,
+        # Fsrc = graph_consistent_frames(
+        #     source_parts,
+        #     part_graph,
+        #     root=root,
+        #     anchors=source_anchors,
+        #     up_hint=up_hint,
+        #     front_hint=front_hint,
+        #     z_mode=z_mode,
+        #     x_mode=x_mode,
+        # )
+        # Ftgt = graph_consistent_frames(
+        #     target_parts,
+        #     part_graph,
+        #     root=root,
+        #     anchors=target_anchors,
+        #     up_hint=up_hint,
+        #     front_hint=front_hint,
+        #     z_mode=z_mode,
+        #     x_mode=x_mode,
+        # )
+        Fsrc = recipe_blended_frames(
+            source_parts, 
+            part_graph, 
             root=root,
-            anchors=source_anchors,
             up_hint=up_hint,
-            front_hint=front_hint,
-            z_mode=z_mode,
+            frontal_hint=front_hint, 
+            anchors=source_anchors,
         )
-        Ftgt = graph_consistent_frames(
+        Ftgt = recipe_blended_frames(
             target_parts,
             part_graph,
             root=root,
-            anchors=target_anchors,
             up_hint=up_hint,
-            front_hint=front_hint,
-            z_mode=z_mode,
+            frontal_hint=front_hint,
+            anchors=target_anchors,
         )
         for k in source_parts.keys():
             source_parts[k]["frame"] = Fsrc[k]
@@ -1497,7 +1856,7 @@ if __name__ == "__main__":
     log_dir = "fit_pointcloud_logs"
     exp_dir = f"smpl_rigid"
     exp_id = sample_name
-    exp_sub_dir = f"exp_{exp_id}_5"
+    exp_sub_dir = f"exp_{exp_id}_6"
     log_dir = os.path.join(log_dir, exp_dir, exp_sub_dir)
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
