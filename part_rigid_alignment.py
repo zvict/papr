@@ -620,8 +620,12 @@ def recipe_blended_frames(
     # Root: choose z then x using local rules (no parent yet)
     a1_root, a2_root = _anisotropy(evals[root])
     if a1_root > tau_aniso:
+        # if verbose:
+        #     print(f"+++ [recipe_blended_frames] root {root} trusting PCA long axis (lam1/lam2={a1_root:.3f})")
         z_root = evecs[root][:, -1]
     else:
+        if verbose:
+            print(f"--- [recipe_blended_frames] root {root} weak PCA anisotropy (lam1/lam2={a1_root:.3f}), using seam cues")
         # use average of neighbor seams
         acc = _np.zeros(3, dtype=_np.float64)
         wsum = 0.0
@@ -632,6 +636,8 @@ def recipe_blended_frames(
     # x: prefer dominant in-plane PCA unless ambiguous; else best neighbor seam
     x_root, (lam1p, lam2p) = _dominant_axis_in_plane(parts[root]["points"], z_root, center=cent[root])
     if lam1p - lam2p < 1e-8:  # ambiguous
+        if verbose:
+            print(f"### [recipe_blended_frames] root {root} ambiguous planar axis (lam1={lam1p:.6f}, lam2={lam2p:.6f}), using seam cues")
         # use best-quality neighbor seam projected
         best = None; best_w = -_np.inf
         for j in nbrs[root]:
@@ -658,8 +664,12 @@ def recipe_blended_frames(
             # Step 1) primary axis z_j
             a1, a2 = _anisotropy(evals[j])
             if a1 > tau_aniso:
+                # if verbose:
+                #     print(f"+++++ [recipe_blended_frames] part {j} trusting PCA long axis (lam1/lam2={a1:.3f})")
                 z_j = evecs[j][:, -1]
             else:
+                if verbose:
+                    print(f"----- [recipe_blended_frames] part {j} weak PCA anisotropy (lam1/lam2={a1:.3f}), using seam cues")
                 # weighted sum of seams
                 acc = _np.zeros(3, dtype=_np.float64)
                 wsum = 0.0
@@ -674,11 +684,15 @@ def recipe_blended_frames(
 
             # fallback to e2 if planar anisotropy is sufficient
             if u is None or _np.linalg.norm(u) < 1e-8:
+                if verbose:
+                    print(f"^^^ [recipe_blended_frames] part {j} fallback to dominant planar PCA axis")
                 x_e2, (lam1p, lam2p) = _dominant_axis_in_plane(parts[j]["points"], z_j, center=cent[j])
                 if lam1p - lam2p > 1e-8:
                     u = x_e2
             # final fallback: best other seam
             if u is None or _np.linalg.norm(u) < 1e-8:
+                if verbose:
+                    print(f"@@@ [recipe_blended_frames] part {j} fallback to best neighbor seam axis")
                 best = None; best_w = -_np.inf
                 for k2 in nbrs[j]:
                     if k2 == i: continue
@@ -689,6 +703,8 @@ def recipe_blended_frames(
                 if best is not None: u = best
 
             if u is None or _np.linalg.norm(u) < 1e-8:
+                if verbose:
+                    print(f"!!! [recipe_blended_frames] part {j} falling back to parent's x axis projection")
                 # last resort: take parent's x projected
                 x_parent = F[i][:, 0]
                 u = _proj_plane(x_parent, z_j)
@@ -700,6 +716,8 @@ def recipe_blended_frames(
             # Step 3) sign disambiguation w.r.t parent seam
             # Ensure +Z roughly points away from parent toward the rest of j
             if _np.dot(z_j, _seam_vec(j, i)) < 0.0:
+                if verbose:
+                    print(f"*** [recipe_blended_frames] part {j} flipping z to point away from parent {i}")
                 z_j = -z_j; x_j = -x_j  # keep right-handed; y stays
                 y_j = _normalize(_np.cross(z_j, x_j))
                 x_j = _normalize(_np.cross(y_j, z_j))
@@ -707,6 +725,8 @@ def recipe_blended_frames(
             # Optionally align x spin so that its projection is concordant with parent seam projection
             sp_proj = _proj_plane(_seam_vec(j, i), z_j)
             if _np.linalg.norm(sp_proj) > 1e-8 and _np.dot(x_j, sp_proj) < 0.0:
+                if verbose:
+                    print(f"$$$ [recipe_blended_frames] part {j} flipping x to align spin with parent seam")
                 x_j = -x_j; y_j = -y_j
 
             F[j] = _np.stack([x_j, y_j, z_j], axis=1)
@@ -1108,6 +1128,11 @@ def estimate_part_rigid_transforms(source_parts, target_parts, part_graph, sourc
             up_hint=up_hint,
             frontal_hint=front_hint, 
             anchors=source_anchors,
+            params={
+                "verbose": True,
+                "tau_aniso": 1.25,
+                # "prefer_parent_for_spin": False,
+            }
         )
         Ftgt = recipe_blended_frames(
             target_parts,
@@ -1116,6 +1141,11 @@ def estimate_part_rigid_transforms(source_parts, target_parts, part_graph, sourc
             up_hint=up_hint,
             frontal_hint=front_hint,
             anchors=target_anchors,
+            params={
+                "verbose": True,
+                "tau_aniso": 1.25,
+                # "prefer_parent_for_spin": False,
+            }
         )
         for k in source_parts.keys():
             source_parts[k]["frame"] = Fsrc[k]
@@ -1856,7 +1886,7 @@ if __name__ == "__main__":
     log_dir = "fit_pointcloud_logs"
     exp_dir = f"smpl_rigid"
     exp_id = sample_name
-    exp_sub_dir = f"exp_{exp_id}_6"
+    exp_sub_dir = f"exp_{exp_id}_7"
     log_dir = os.path.join(log_dir, exp_dir, exp_sub_dir)
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
@@ -1929,7 +1959,8 @@ if __name__ == "__main__":
             # prior_mu=10.0,
             smooth_lambda=0.0,
             boundary_gamma=1.0,
-            prior_mu=1.0,
+            # prior_mu=1.0,
+            prior_mu=0.0,
             # smooth_lambda=0.0,
             # boundary_gamma=0.0,
             # prior_mu=0.0,
