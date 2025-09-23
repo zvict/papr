@@ -511,6 +511,8 @@ def recipe_blended_frames(
       params: optional dict of hyper-parameters:
         - tau_aniso: float, anisotropy threshold for trusting PCA long axis (default 1.3)
         - prefer_parent_for_spin: bool, if True align x with parent seam projection when available (default True)
+        - blend_spin_cues: bool, if True blend seam/parent/PCA cues for the in-plane axis instead of serial fallbacks (default False)
+        - spin_flip_quality_min: float, minimum seam quality required before applying seam-based spin flips (default 5.0)
         - verbose: bool
 
     Returns:
@@ -522,6 +524,8 @@ def recipe_blended_frames(
     if params is None: params = {}
     tau_aniso = float(params.get("tau_aniso", 1.3))
     prefer_parent_for_spin = bool(params.get("prefer_parent_for_spin", True))
+    blend_spin_cues = bool(params.get("blend_spin_cues", False))
+    spin_flip_quality_min = float(params.get("spin_flip_quality_min", 5.0))
     verbose = bool(params.get("verbose", False))
 
     keys = list(parts.keys())
@@ -633,6 +637,9 @@ def recipe_blended_frames(
             wq = _seam_quality(root, j)
             acc += wq * _seam_vec(root, j); wsum += wq
         z_root = _normalize(acc) if wsum>1e-12 else evecs[root][:, -1]
+    if up_hint is not None:
+        if np.dot(z_root, up_hint) < 0:
+            z_root = -z_root
     # x: prefer dominant in-plane PCA unless ambiguous; else best neighbor seam
     x_root, (lam1p, lam2p) = _dominant_axis_in_plane(parts[root]["points"], z_root, center=cent[root])
     if lam1p - lam2p < 1e-8:  # ambiguous
@@ -678,18 +685,68 @@ def recipe_blended_frames(
                     acc += wq * _seam_vec(j, k2); wsum += wq
                 z_j = _normalize(acc) if wsum>1e-12 else evecs[j][:, -1]
 
-            # Step 2) in-plane cue u: parent seam projected preferred
-            sp = _seam_vec(j, i)  # seam direction from j toward its parent i, in j's coords
-            u = _proj_plane(sp, z_j) if prefer_parent_for_spin else None
+            # Step 2) build in-plane cues by combining seam, parent, and geometric hints
+            sp = _seam_vec(j, i)
+            sp_proj = _proj_plane(sp, z_j)
+            sp_proj_norm = _np.linalg.norm(sp_proj)
+            sp_proj_norm_threshold = 0.1
+            seam_quality = _seam_quality(j, i)
 
-            # fallback to e2 if planar anisotropy is sufficient
+            x_parent = F[i][:, 0]
+            x_parent_proj = _proj_plane(x_parent, z_j)
+            n_xpp = _np.linalg.norm(x_parent_proj)
+            x_parent_proj_unit = x_parent_proj / (n_xpp + 1e-12)
+
+            is_leaf = len(nbrs.get(j, [])) <= 1
+            w_plane = None
+            if is_leaf and anchors is not None and (i, j) in anchors:
+                Xj = parts[j]["points"]
+                d = _nn_distances_to_set(Xj, anchors[(i, j)])
+                q50, q90 = np.quantile(d, 0.5), np.quantile(d, 0.9)
+                # q50, q90 = np.quantile(d, 0.2), np.quantile(d, 0.9)
+                denom = max(q90 - q50, 1e-6)
+                w_plane = np.clip((d - q50) / denom, 0.0, 1.0) ** 2
+            x_e2, (lam1p, lam2p) = _dominant_axis_in_plane(
+                parts[j]["points"], z_j, w=w_plane, center=cent[j]
+            )
+            lam_gap = lam1p - lam2p
+            anis_ratio = lam1p / (lam2p + 1e-12) if lam2p > 0 else _np.inf
+
+            u = None
+            if blend_spin_cues:
+                candidates = []
+                geo_weight = float(max(min(anis_ratio - 1.0, 4.0), 0.0))
+                if lam_gap > 1e-8 and geo_weight > 0.0:
+                    candidates.append((x_e2, geo_weight))
+                if n_xpp > 1e-6:
+                    parent_weight = float(max(n_xpp, 1e-3))
+                    candidates.append((x_parent_proj_unit, parent_weight))
+                if prefer_parent_for_spin and sp_proj_norm > 1e-6:
+                    seam_weight = seam_quality * sp_proj_norm
+                    if anchors is None or (j, i) not in anchors:
+                        seam_weight *= 0.5
+                    seam_weight = float(min(max(seam_weight, 0.0), 20.0))
+                    # if verbose:
+                    #     print(f"~~~ part {j} seam weight = {seam_weight:.3f} (quality={seam_quality:.3f}, len={sp_proj_norm:.3f})")
+                    if seam_weight > 0.0:
+                        candidates.append((sp_proj / (sp_proj_norm + 1e-12), seam_weight))
+                if candidates:
+                    acc = _np.zeros(3, dtype=_np.float64)
+                    for vec, weight in candidates:
+                        acc += float(weight) * vec
+                    if _np.linalg.norm(acc) > 1e-8:
+                        u = acc
+            else:
+                if prefer_parent_for_spin and sp_proj_norm > 1e-8:
+                    u = sp_proj
+
             if u is None or _np.linalg.norm(u) < 1e-8:
-                if verbose:
-                    print(f"^^^ [recipe_blended_frames] part {j} fallback to dominant planar PCA axis")
-                x_e2, (lam1p, lam2p) = _dominant_axis_in_plane(parts[j]["points"], z_j, center=cent[j])
-                if lam1p - lam2p > 1e-8:
+                if lam_gap > 1e-8:
                     u = x_e2
-            # final fallback: best other seam
+                else:
+                    if verbose:
+                        print(f"~~~ [recipe_blended_frames] part {j} planar PCA axis also ambiguous (lam1={lam1p:.6f}, lam2={lam2p:.6f})")
+
             if u is None or _np.linalg.norm(u) < 1e-8:
                 if verbose:
                     print(f"@@@ [recipe_blended_frames] part {j} fallback to best neighbor seam axis")
@@ -700,14 +757,13 @@ def recipe_blended_frames(
                     cand = _proj_plane(_seam_vec(j, k2), z_j)
                     if _np.linalg.norm(cand) < 1e-8: continue
                     if wq > best_w: best_w = wq; best = cand
-                if best is not None: u = best
+                if best is not None:
+                    u = best
 
             if u is None or _np.linalg.norm(u) < 1e-8:
                 if verbose:
                     print(f"!!! [recipe_blended_frames] part {j} falling back to parent's x axis projection")
-                # last resort: take parent's x projected
-                x_parent = F[i][:, 0]
-                u = _proj_plane(x_parent, z_j)
+                u = x_parent_proj
 
             x_j = _normalize(u)
             y_j = _normalize(_np.cross(z_j, x_j))
@@ -723,11 +779,19 @@ def recipe_blended_frames(
                 x_j = _normalize(_np.cross(y_j, z_j))
 
             # Optionally align x spin so that its projection is concordant with parent seam projection
-            sp_proj = _proj_plane(_seam_vec(j, i), z_j)
-            if _np.linalg.norm(sp_proj) > 1e-8 and _np.dot(x_j, sp_proj) < 0.0:
-                if verbose:
-                    print(f"$$$ [recipe_blended_frames] part {j} flipping x to align spin with parent seam")
-                x_j = -x_j; y_j = -y_j
+            if prefer_parent_for_spin and anchors is not None and (j, i) in anchors:
+                ok_len = sp_proj_norm > 0.1
+                dot_x_sp = float(_np.dot(x_j, sp_proj))
+                ok_dot = dot_x_sp < -0.1
+                ok_quality = seam_quality >= spin_flip_quality_min
+                ambiguous = anis_ratio < 1.05
+                parent_agrees = (n_xpp > 0.2 and _np.dot(x_j, x_parent_proj) > 0)
+                if verbose and j == "right_upper_leg":
+                    print(f"$$$ part {j} seam_quality = {seam_quality:.3f}, dot(x, seam_proj)={dot_x_sp:.3f}, anis_ratio={anis_ratio:.3f}, n_xpp={n_xpp:.3f}, parent_agrees={parent_agrees}")
+                if ok_len and ok_dot and ok_quality and ambiguous and not parent_agrees:
+                    if verbose:
+                        print(f"$$$ [recipe_blended_frames] part {j} flipping x (seam-gated)")
+                    x_j = -x_j; y_j = -y_j
 
             F[j] = _np.stack([x_j, y_j, z_j], axis=1)
             visited.add(j)
@@ -1132,6 +1196,7 @@ def estimate_part_rigid_transforms(source_parts, target_parts, part_graph, sourc
                 "verbose": True,
                 "tau_aniso": 1.25,
                 # "prefer_parent_for_spin": False,
+                "blend_spin_cues": True,
             }
         )
         Ftgt = recipe_blended_frames(
@@ -1145,6 +1210,7 @@ def estimate_part_rigid_transforms(source_parts, target_parts, part_graph, sourc
                 "verbose": True,
                 "tau_aniso": 1.25,
                 # "prefer_parent_for_spin": False,
+                "blend_spin_cues": True,
             }
         )
         for k in source_parts.keys():
@@ -1364,11 +1430,32 @@ def estimate_part_rigid_transforms(source_parts, target_parts, part_graph, sourc
 # -------------------------------
 
 
-def _median_nn_spacing(X, max_samples=4096):
+def _rng_choice(rng, n, size, replace=False):
+    """Helper: draw indices using either a provided RNG or global numpy."""
+    if rng is None:
+        return np.random.choice(n, size, replace=replace)
+    if hasattr(rng, "choice"):
+        return rng.choice(n, size, replace=replace)
+    # Fallback for legacy RandomState which also exposes choice
+    return np.random.choice(n, size, replace=replace)
+
+
+def _rng_randint(rng, high):
+    """Helper: draw single integer in [0, high)."""
+    if rng is None:
+        return int(np.random.randint(high))
+    if hasattr(rng, "integers"):
+        return int(rng.integers(high))
+    if hasattr(rng, "randint"):
+        return int(rng.randint(high))
+    return int(np.random.randint(high))
+
+
+def _median_nn_spacing(X, max_samples=4096, rng=None):
     """Median distance to the 2nd nearest neighbor (proxy for point spacing)."""
     Xs = X
     if X.shape[0] > max_samples:
-        idx = np.random.choice(X.shape[0], max_samples, replace=False)
+        idx = _rng_choice(rng, X.shape[0], max_samples, replace=False)
         Xs = X[idx]
     try:
         from sklearn.neighbors import KDTree
@@ -1396,14 +1483,14 @@ def _nn_distances_all(X, Y):
         return np.sqrt(d2.min(axis=1))
 
 
-def _farthest_point_sampling(P, K):
+def _farthest_point_sampling(P, K, rng=None):
     """Simple FPS on point set P (N,3)."""
     N = P.shape[0]
     if N == 0:
         return P
     if N <= K:
         return P.copy()
-    sel = [np.random.randint(N)]
+    sel = [_rng_randint(rng, N)]
     d = np.full(N, np.inf, dtype=float)
     for _ in range(1, K):
         last = P[sel[-1]]
@@ -1413,7 +1500,7 @@ def _farthest_point_sampling(P, K):
 
 
 def compute_seam_anchors_from_parts(
-    parts, part_graph, k_per_edge=64, radius_scale=2.0, symmetric=True
+    parts, part_graph, k_per_edge=64, radius_scale=2.0, symmetric=True, rng=None
 ):
     """
     Build seam anchors for each adjacent pair (i,j) in part_graph from *source* parts.
@@ -1427,10 +1514,13 @@ def compute_seam_anchors_from_parts(
           * Union those points, then sample up to k_per_edge with FPS for even coverage.
       - If `symmetric` is True, produce both keys (i,j) and (j,i) in the dict.
 
+    Args:
+      rng: optional numpy random number generator for deterministic sampling.
+
     Returns:
       anchors: dict[(i,j)] -> (K,3) numpy array of anchor points near the seam.
     """
-    spacing = {k: _median_nn_spacing(v["points"]) for k, v in parts.items()}
+    spacing = {k: _median_nn_spacing(v["points"], rng=rng) for k, v in parts.items()}
     anchors = {}
     for i, j, w in part_graph:
         if i not in parts or j not in parts:
@@ -1457,7 +1547,7 @@ def compute_seam_anchors_from_parts(
             seam_union = np.concatenate([seam_i, seam_j], axis=0)
         else:
             seam_union = seam_i if seam_i.size else seam_j
-        seam_union = _farthest_point_sampling(seam_union, k_per_edge)
+        seam_union = _farthest_point_sampling(seam_union, k_per_edge, rng=rng)
 
         anchors[(i, j)] = seam_union
         if symmetric:
@@ -1655,7 +1745,7 @@ def visualize_init_frames_plotly(source_parts, target_parts, log_dir, part_order
         # use provided frame if present; else compute via PCA (use normals if available)
         F = d.get("frame", None)
         if F is not None:
-            print(f"Part {part_name} Using provided frame for part.")
+            # print(f"Part {part_name} Using provided frame for part.")
             return np.asarray(F)
         normals = d.get("normals", d.get("normal", None))
         return pca_frame(np.asarray(d[pts_key]), normals, part_name=part_name)
@@ -1853,7 +1943,7 @@ if __name__ == "__main__":
         for name in part_names
     }
 
-    sample_name = "sample_5"
+    sample_name = "sample_2"
     ref_obj_mesh = trimesh.load(
         f"/NAS/spa176/skeleton-free-pose-transfer/demo/smpl_pose_0/{sample_name}.obj",
         process=False,
@@ -1886,7 +1976,7 @@ if __name__ == "__main__":
     log_dir = "fit_pointcloud_logs"
     exp_dir = f"smpl_rigid"
     exp_id = sample_name
-    exp_sub_dir = f"exp_{exp_id}_7"
+    exp_sub_dir = f"exp_{exp_id}_6"
     log_dir = os.path.join(log_dir, exp_dir, exp_sub_dir)
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
@@ -1927,22 +2017,60 @@ if __name__ == "__main__":
     # for k in source.keys():
     #     source[k]["frame"] = Fsrc[k]
     #     target[k]["frame"] = Ftgt[k]
-    source_anchors = None
-    # NEW: compute seam anchors from source parts (assumes good segmentation)
-    source_anchors = compute_seam_anchors_from_parts(
-        source,  # dict[label] -> {"points": (N,3), ...}
-        graph,  # list of (i, j, w)
-        k_per_edge=32,  # number of seam samples per edge
-        radius_scale=2.0,  # seam radius ~ 2x point spacing
-        symmetric=True,  # produce both (i,j) and (j,i)
+    random_seed = 42
+    seed_base = int(random_seed)
+    solver_params = dict(
+        outer_iters=15,
+        keep_ratio_schedule=[0.7, 0.8, 0.85, 0.9],
+        # smooth_lambda=20.0,
+        # boundary_gamma=80.0,
+        # prior_mu=10.0,
+        smooth_lambda=0.0,
+        boundary_gamma=1.0,
+        # prior_mu=1.0,
+        prior_mu=0.0,
+        # smooth_lambda=0.0,
+        # boundary_gamma=0.0,
+        # prior_mu=0.0,
+        lm_damp=1e-6,
+        verbose=True,
+        export_meshes=True,
+        log_dir=log_dir,
+        source_faces=source_faces,
+        part_indices=part_indices,
+        init_mode="graph",
+        root_part_id="root",
+        front_hint=front_hint,
+        up_hint=up_hint,
+        z_mode="seam_centroid_to_centroid_direction",
+        random_seed=seed_base,
+        # p2p_parts=["left_lower_arm", "right_lower_arm"],
+        # debug_parts=["left_lower_arm", "right_lower_arm"],
+        debug_parts=["left_upper_leg", "right_upper_leg"],
+        # debug_parts=["head_neck"],
+        debug_plot=True,
+        # flip_normals=["left_lower_arm", "right_lower_arm"],
     )
-    target_anchors = None
+
+    rng_source = np.random.default_rng(seed_base)
+    rng_target = np.random.default_rng(seed_base + 1)
+
+    # NEW: compute seam anchors from source/target parts with deterministic sampling
+    source_anchors = compute_seam_anchors_from_parts(
+        source,
+        graph,
+        k_per_edge=8,
+        radius_scale=0.5,
+        symmetric=True,
+        rng=rng_source,
+    )
     target_anchors = compute_seam_anchors_from_parts(
-        target,  # dict[label] -> {"points": (N,3), ...}
-        graph,  # list of (i, j, w)
-        k_per_edge=32,  # number of seam samples per edge
-        radius_scale=2.0,  # seam radius ~ 2x point spacing
-        symmetric=True,  # produce both (i,j) and (j,i)
+        target,
+        graph,
+        k_per_edge=8,
+        radius_scale=0.5,
+        symmetric=True,
+        rng=rng_target,
     )
 
     T = estimate_part_rigid_transforms(
@@ -1951,36 +2079,7 @@ if __name__ == "__main__":
         graph,
         source_anchors=source_anchors,
         target_anchors=target_anchors,
-        params=dict(
-            outer_iters=15,
-            keep_ratio_schedule=[0.7, 0.8, 0.85, 0.9],
-            # smooth_lambda=20.0,
-            # boundary_gamma=80.0,
-            # prior_mu=10.0,
-            smooth_lambda=0.0,
-            boundary_gamma=1.0,
-            # prior_mu=1.0,
-            prior_mu=0.0,
-            # smooth_lambda=0.0,
-            # boundary_gamma=0.0,
-            # prior_mu=0.0,
-            lm_damp=1e-6,
-            verbose=True,
-            export_meshes=True,
-            log_dir=log_dir,
-            source_faces=source_faces,
-            part_indices=part_indices,
-            init_mode="graph",
-            root_part_id="root",
-            front_hint=front_hint,
-            up_hint=up_hint,
-            z_mode="seam_centroid_to_centroid_direction",
-            # p2p_parts=["left_lower_arm", "right_lower_arm"],
-            # debug_parts=["left_lower_arm", "right_lower_arm"],
-            debug_parts=["head_neck"],
-            debug_plot=True,
-            # flip_normals=["left_lower_arm", "right_lower_arm"],
-        ),
+        params=solver_params,
         log_dir=log_dir,
     )
     print("Keys:", list(T.keys()))
