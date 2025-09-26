@@ -26,6 +26,8 @@ Notes:
 - KD-tree optional: if sklearn is present, we use it; else we do a brute-force NN (works for prototypes, slower).
 """
 
+import copy
+import itertools
 import os
 import shutil
 from typing import Any, List, Tuple
@@ -99,6 +101,46 @@ def se3_apply(R, t, X, center=None):
         return (X @ R.T) + t[None, :]
     else:
         return ((X - center[None,:]) @ R.T) + center[None,:] + t[None,:]
+
+
+def _clone_states(states):
+    """Deep-clone states dict while preserving numpy arrays."""
+    cloned = {}
+    for k, state in states.items():
+        cloned_state = {}
+        for field, value in state.items():
+            if isinstance(value, np.ndarray):
+                cloned_state[field] = value.copy()
+            else:
+                cloned_state[field] = copy.deepcopy(value)
+        cloned[k] = cloned_state
+    return cloned
+
+
+def _axis_flip_matrix(axis: str) -> np.ndarray:
+    axis = axis.lower()
+    if axis == "x":
+        return np.diag([1.0, -1.0, -1.0])
+    if axis == "y":
+        return np.diag([-1.0, 1.0, -1.0])
+    if axis == "z":
+        return np.diag([-1.0, -1.0, 1.0])
+    raise ValueError(f"Unsupported axis '{axis}' for flip test")
+
+
+def _enumerate_flip_mats(axes):
+    axes = [a.lower() for a in axes if a]
+    if not axes:
+        return [np.eye(3)]
+    mats = []
+    for mask in itertools.product([0, 1], repeat=len(axes)):
+        M = np.eye(3)
+        for axis, flag in zip(axes, mask):
+            if flag:
+                M = _axis_flip_matrix(axis) @ M
+        if not any(np.allclose(M, existing) for existing in mats):
+            mats.append(M)
+    return mats
 
 # -------------------------------
 # Correspondence utilities
@@ -512,7 +554,11 @@ def recipe_blended_frames(
         - tau_aniso: float, anisotropy threshold for trusting PCA long axis (default 1.3)
         - prefer_parent_for_spin: bool, if True align x with parent seam projection when available (default True)
         - blend_spin_cues: bool, if True blend seam/parent/PCA cues for the in-plane axis instead of serial fallbacks (default False)
+        - blend_spin_cues_signless: bool, if True fuse spin cues via signless second-moment blending (default True)
+        - blend_include_neighbors: bool, if True add non-parent neighbor seams to blended spin cues (default True)
+        - neighbor_consensus_sign: bool, if True use neighbor seams to pick spin sign on non-leaf parts (default True)
         - spin_flip_quality_min: float, minimum seam quality required before applying seam-based spin flips (default 5.0)
+        - spin_ambiguous_ratio: float, anisotropy ratio below which planar PCA is treated as ambiguous for seam flips (default 1.15)
         - verbose: bool
 
     Returns:
@@ -525,7 +571,11 @@ def recipe_blended_frames(
     tau_aniso = float(params.get("tau_aniso", 1.3))
     prefer_parent_for_spin = bool(params.get("prefer_parent_for_spin", True))
     blend_spin_cues = bool(params.get("blend_spin_cues", False))
+    blend_spin_cues_signless = bool(params.get("blend_spin_cues_signless", True))
+    blend_include_neighbors = bool(params.get("blend_include_neighbors", True))
+    neighbor_consensus_sign = bool(params.get("neighbor_consensus_sign", True))
     spin_flip_quality_min = float(params.get("spin_flip_quality_min", 5.0))
+    spin_ambiguous_ratio = float(params.get("spin_ambiguous_ratio", 1.15))
     verbose = bool(params.get("verbose", False))
 
     keys = list(parts.keys())
@@ -714,13 +764,14 @@ def recipe_blended_frames(
 
             u = None
             if blend_spin_cues:
-                candidates = []
                 geo_weight = float(max(min(anis_ratio - 1.0, 4.0), 0.0))
+                candidate_info = []
                 if lam_gap > 1e-8 and geo_weight > 0.0:
-                    candidates.append((x_e2, geo_weight))
+                    candidate_info.append((x_e2, geo_weight))
                 if n_xpp > 1e-6:
                     parent_weight = float(max(n_xpp, 1e-3))
-                    candidates.append((x_parent_proj_unit, parent_weight))
+                    candidate_info.append((x_parent_proj_unit, parent_weight))
+                seam_weight = 0.0
                 if prefer_parent_for_spin and sp_proj_norm > 1e-6:
                     seam_weight = seam_quality * sp_proj_norm
                     if anchors is None or (j, i) not in anchors:
@@ -729,10 +780,34 @@ def recipe_blended_frames(
                     # if verbose:
                     #     print(f"~~~ part {j} seam weight = {seam_weight:.3f} (quality={seam_quality:.3f}, len={sp_proj_norm:.3f})")
                     if seam_weight > 0.0:
-                        candidates.append((sp_proj / (sp_proj_norm + 1e-12), seam_weight))
-                if candidates:
+                        sp_unit = sp_proj / (sp_proj_norm + 1e-12)
+                        candidate_info.append((sp_unit, seam_weight))
+                if blend_include_neighbors and len(nbrs.get(j, [])) >= 2:
+                    for k2 in nbrs[j]:
+                        if k2 == i:
+                            continue
+                        neigh = _proj_plane(_seam_vec(j, k2), z_j)
+                        neigh_norm = _np.linalg.norm(neigh)
+                        if neigh_norm < 1e-6:
+                            continue
+                        wq = _seam_quality(j, k2)
+                        if wq <= 0.0:
+                            continue
+                        candidate_info.append((neigh / (neigh_norm + 1e-12), float(wq)))
+                if blend_spin_cues_signless:
+                    S = _np.zeros((3, 3), dtype=_np.float64)
+                    wsum = 0.0
+                    for vec, weight in candidate_info:
+                        if weight <= 0.0:
+                            continue
+                        S += float(weight) * _np.outer(vec, vec)
+                        wsum += float(weight)
+                    if wsum > 0.0:
+                        vals_S, vecs_S = _np.linalg.eigh(S)
+                        u = vecs_S[:, -1]
+                if u is None and candidate_info:
                     acc = _np.zeros(3, dtype=_np.float64)
-                    for vec, weight in candidates:
+                    for vec, weight in candidate_info:
                         acc += float(weight) * vec
                     if _np.linalg.norm(acc) > 1e-8:
                         u = acc
@@ -778,13 +853,33 @@ def recipe_blended_frames(
                 y_j = _normalize(_np.cross(z_j, x_j))
                 x_j = _normalize(_np.cross(y_j, z_j))
 
+            if neighbor_consensus_sign and len(nbrs.get(j, [])) >= 2:
+                cons = _np.zeros(3, dtype=_np.float64)
+                wsum = 0.0
+                for k2 in nbrs[j]:
+                    if k2 == i:
+                        continue
+                    wq = _seam_quality(j, k2)
+                    if wq <= 0.0:
+                        continue
+                    c = _proj_plane(_seam_vec(j, k2), z_j)
+                    cn = _np.linalg.norm(c)
+                    if cn < 1e-6:
+                        continue
+                    cons += float(wq) * (c / (cn + 1e-12))
+                    wsum += float(wq)
+                if wsum > 0.0 and _np.linalg.norm(cons) > 1e-6:
+                    c_hat = cons / (_np.linalg.norm(cons) + 1e-12)
+                    if _np.dot(x_j, c_hat) < 0.0:
+                        x_j = -x_j; y_j = -y_j
+
             # Optionally align x spin so that its projection is concordant with parent seam projection
             if prefer_parent_for_spin and anchors is not None and (j, i) in anchors:
                 ok_len = sp_proj_norm > 0.1
                 dot_x_sp = float(_np.dot(x_j, sp_proj))
                 ok_dot = dot_x_sp < -0.1
                 ok_quality = seam_quality >= spin_flip_quality_min
-                ambiguous = anis_ratio < 1.05
+                ambiguous = anis_ratio < spin_ambiguous_ratio
                 parent_agrees = (n_xpp > 0.2 and _np.dot(x_j, x_parent_proj) > 0)
                 if verbose and j == "right_upper_leg":
                     print(f"$$$ part {j} seam_quality = {seam_quality:.3f}, dot(x, seam_proj)={dot_x_sp:.3f}, anis_ratio={anis_ratio:.3f}, n_xpp={n_xpp:.3f}, parent_agrees={parent_agrees}")
@@ -1054,6 +1149,12 @@ DEFAULTS = dict(
     root_part_id="root",
     z_mode="centroid",
     x_mode="distal_centroid",
+    initial_axis_flip_enabled=False,
+    initial_axis_flip_axes=["z"],
+    initial_axis_flip_include_z=False,
+    initial_axis_flip_use_data_terms=False,
+    initial_axis_flip_keep_ratio=None,
+    initial_axis_flip_parts=None,
 )
 
 def build_data_terms(source_parts, target_parts, states, keep_ratio, p2p_parts=None, flip_normals=None):
@@ -1150,6 +1251,149 @@ def total_cost(parts_keys, states, data_terms, smooth_terms, boundary_terms, pri
         cost += w_p * float(r @ r)
     return cost
 
+
+def _search_initial_axis_flips(
+    states,
+    parts_keys,
+    part_graph,
+    source_parts,
+    target_parts,
+    source_anchors,
+    cfg,
+    keep_ratio=None,
+    axes=None,
+    parts=None,
+    include_data_terms=False,
+    p2p_parts=None,
+    flip_normals=None,
+    verbose=False,
+):
+    axes = list(axes or [])
+    if cfg.get("initial_axis_flip_include_z", False) and "z" not in axes:
+        axes.append("z")
+    flip_mats = _enumerate_flip_mats(axes)
+    if len(flip_mats) <= 1:
+        return _clone_states(states), dict(improvement=0.0, original_cost=0.0, final_cost=0.0, changed_parts=[])
+
+    boundary_terms = build_boundary_terms(source_anchors, cfg["boundary_gamma"])
+    use_boundary = len(boundary_terms) > 0
+    if not include_data_terms and not use_boundary:
+        return _clone_states(states), dict(improvement=0.0, original_cost=0.0, final_cost=0.0, changed_parts=[])
+
+    keep_schedule = cfg.get("keep_ratio_schedule", [])
+    if keep_ratio is None:
+        keep_ratio_eval = keep_schedule[0] if len(keep_schedule) > 0 else 0.9
+    else:
+        keep_ratio_eval = float(keep_ratio)
+
+    p2p_parts = set(p2p_parts or [])
+    flip_normals = set(flip_normals or [])
+
+    smooth_terms = []
+    prior_terms = []
+
+    def evaluate(candidate_states):
+        data_terms = build_data_terms(
+            source_parts,
+            target_parts,
+            candidate_states,
+            keep_ratio_eval,
+            p2p_parts=p2p_parts,
+            flip_normals=flip_normals,
+        ) if include_data_terms else {}
+        return total_cost(parts_keys, candidate_states, data_terms, smooth_terms, boundary_terms, prior_terms)
+
+    working_states = _clone_states(states)
+    base_cost = evaluate(working_states)
+
+    parts_filter = None if parts is None else {p for p in parts if p in working_states}
+
+    # Build adjacency map and traverse in BFS order across the part graph, mirroring recipe_blended_frames
+    neighbors = {k: [] for k in parts_keys}
+    if part_graph is not None:
+        for (i, j, *_) in part_graph:
+            if i in neighbors and j in neighbors:
+                neighbors[i].append(j)
+                neighbors[j].append(i)
+
+    from collections import deque
+
+    traversal = []
+    visited = set()
+
+    def enqueue_component(start):
+        if start in visited or start not in neighbors:
+            return
+        queue = deque([start])
+        visited.add(start)
+        while queue:
+            node = queue.popleft()
+            if parts_filter is None or node in parts_filter:
+                traversal.append(node)
+            for nbr in neighbors.get(node, []):
+                if nbr not in visited:
+                    visited.add(nbr)
+                    queue.append(nbr)
+
+    root = cfg.get("root_part_id", None)
+    if root is not None:
+        enqueue_component(root)
+    for k in parts_keys:
+        enqueue_component(k)
+
+    # Ensure isolated or filtered parts are still considered
+    if parts_filter is not None:
+        for p in parts_filter:
+            if p not in traversal and p in working_states:
+                traversal.append(p)
+    else:
+        for k in parts_keys:
+            if k not in traversal and k in working_states:
+                traversal.append(k)
+
+    if not traversal:
+        return working_states, dict(improvement=0.0, original_cost=base_cost, final_cost=base_cost, changed_parts=[])
+
+    best_cost = base_cost
+    changed_parts = []
+
+    for part in traversal:
+        # print_details = (part == "left_upper_leg") and verbose
+        print_details = verbose
+        part_best_cost = best_cost
+        part_best_states = working_states
+        part_changed = False
+        for mat in flip_mats[1:]:
+            candidate_states = _clone_states(working_states)
+            R_candidate = mat @ candidate_states[part]["R"]
+            candidate_states[part]["R"] = R_candidate
+            candidate_states[part]["R0"] = R_candidate.copy()
+            candidate_cost = evaluate(candidate_states)
+            if print_details:
+                print(f"@@@ [init axis flip] part {part} try flip mat:\n{mat}\n  cost = {candidate_cost:.6e} (best {part_best_cost:.6e})")
+            if candidate_cost + 1e-9 < part_best_cost:
+                part_best_cost = candidate_cost
+                part_best_states = candidate_states
+                part_changed = True
+        if part_changed:
+            working_states = part_best_states
+            best_cost = part_best_cost
+            changed_parts.append(part)
+
+    if verbose and changed_parts and base_cost > 0:
+        print(
+            "[init axis flip] parts={} reduced seam cost {:.6e} -> {:.6e}".format(
+                changed_parts, base_cost, best_cost
+            )
+        )
+
+    return working_states, dict(
+        improvement=max(base_cost - best_cost, 0.0),
+        original_cost=base_cost,
+        final_cost=best_cost,
+        changed_parts=changed_parts,
+    )
+
 def estimate_part_rigid_transforms(source_parts, target_parts, part_graph, source_anchors=None, target_anchors=None, params=None, log_dir="."):
     """Main entry: returns dict part_id -> {'R','t'}"""
     if params is None: params = {}
@@ -1197,6 +1441,7 @@ def estimate_part_rigid_transforms(source_parts, target_parts, part_graph, sourc
                 "tau_aniso": 1.25,
                 # "prefer_parent_for_spin": False,
                 "blend_spin_cues": True,
+                "blend_include_neighbors": False,
             }
         )
         Ftgt = recipe_blended_frames(
@@ -1211,6 +1456,7 @@ def estimate_part_rigid_transforms(source_parts, target_parts, part_graph, sourc
                 "tau_aniso": 1.25,
                 # "prefer_parent_for_spin": False,
                 "blend_spin_cues": True,
+                "blend_include_neighbors": False,
             }
         )
         for k in source_parts.keys():
@@ -1226,6 +1472,35 @@ def estimate_part_rigid_transforms(source_parts, target_parts, part_graph, sourc
     #     up_hint_strategy=cfg.get("up_hint_strategy", "farthest"),
     #     use_up_hints=cfg.get("use_up_hints", True)
     # )
+
+    # Debug/diagnostic part options
+    debug_parts = set(params.get("debug_parts", []))
+    p2p_parts = set(params.get("p2p_parts", []))  # force p2point for selected parts
+    flip_normals = set(params.get("flip_normals", []))  # optional normal flip for debug
+
+    if cfg.get("initial_axis_flip_enabled", False):
+        print("=== Initial axis flip search ===")
+        axes_to_try = list(cfg.get("initial_axis_flip_axes", ["z"]))
+        initial_flip_parts = cfg.get("initial_axis_flip_parts", None)
+        keep_ratio_eval = cfg.get("initial_axis_flip_keep_ratio", None)
+        states_candidate, _ = _search_initial_axis_flips(
+            states,
+            parts_keys,
+            part_graph,
+            source_parts,
+            target_parts,
+            source_anchors,
+            cfg,
+            keep_ratio=keep_ratio_eval,
+            axes=axes_to_try,
+            parts=initial_flip_parts,
+            include_data_terms=cfg.get("initial_axis_flip_use_data_terms", False),
+            p2p_parts=p2p_parts,
+            flip_normals=flip_normals,
+            verbose=cfg.get("verbose", False),
+        )
+        states = states_candidate
+        print("=== End initial axis flip search ===")
 
     # NEW: visualize initial frames/centroids before optimization
     visualize_init_frames_plotly(
@@ -1259,13 +1534,6 @@ def estimate_part_rigid_transforms(source_parts, target_parts, part_graph, sourc
             )
             initial_mesh = trimesh.Trimesh(vertices=initial_vertices, faces=source_faces, process=False)
             initial_mesh.export(os.path.join(log_dir, "iter_00_initial.obj"))
-
-    # Debug config
-    debug_parts = set(params.get("debug_parts", []))
-    p2p_parts = set(params.get("p2p_parts", []))  # force p2point for selected parts
-    flip_normals = set(
-        params.get("flip_normals", [])
-    )  # try flipping normals sign for selected parts
 
     def _debug_part_report(it, k, states_k):
         # lightweight stats on matches for one part
@@ -1976,7 +2244,7 @@ if __name__ == "__main__":
     log_dir = "fit_pointcloud_logs"
     exp_dir = f"smpl_rigid"
     exp_id = sample_name
-    exp_sub_dir = f"exp_{exp_id}_6"
+    exp_sub_dir = f"exp_{exp_id}_8"
     log_dir = os.path.join(log_dir, exp_dir, exp_sub_dir)
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
@@ -2050,6 +2318,7 @@ if __name__ == "__main__":
         # debug_parts=["head_neck"],
         debug_plot=True,
         # flip_normals=["left_lower_arm", "right_lower_arm"],
+        initial_axis_flip_enabled=True,
     )
 
     rng_source = np.random.default_rng(seed_base)

@@ -138,17 +138,37 @@ def run_merged_pipeline(
     # part_indices = {int(pid): np.where((source_segmentation if source_segmentation is not None else target_segmentation) == pid)[0]
     #                 for pid in ordered_keys}
 
+    random_seed = 0
+    if rigid_params and "random_seed" in rigid_params:
+        random_seed = rigid_params["random_seed"]
+    if random_seed is None:
+        random_seed = 0
+    seed_base = int(random_seed)
+
+    rng_source = np.random.default_rng(seed_base)
+    rng_target = np.random.default_rng(seed_base + 1)
+
     # Build seam anchors from parts (mirroring part_rigid_alignment main)
     rigid_dir = os.path.join(log_dir, "rigid")
     try:
         source_anchors = compute_seam_anchors_from_parts(
-            src_parts, graph_edges, k_per_edge=32, radius_scale=2.0, symmetric=True
+            src_parts,
+            graph_edges,
+            k_per_edge=32,
+            radius_scale=2.0,
+            symmetric=True,
+            rng=rng_source,
         )
     except Exception:
         source_anchors = None
     try:
         target_anchors = compute_seam_anchors_from_parts(
-            tgt_parts, graph_edges, k_per_edge=32, radius_scale=2.0, symmetric=True
+            tgt_parts,
+            graph_edges,
+            k_per_edge=32,
+            radius_scale=2.0,
+            symmetric=True,
+            rng=rng_target,
         )
     except Exception:
         target_anchors = None
@@ -167,9 +187,11 @@ def run_merged_pipeline(
         # root_part_id=ordered_keys[0] if len(ordered_keys) else None,
         root_part_id="root",
         z_mode="seam_centroid_to_centroid_direction",
+        random_seed=seed_base,
     )
     if rigid_params:
         rigid_params_full.update(rigid_params)
+        rigid_params_full["random_seed"] = seed_base
 
     T = estimate_part_rigid_transforms(
         src_parts,
