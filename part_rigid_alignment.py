@@ -888,6 +888,14 @@ def recipe_blended_frames(
                         print(f"$$$ [recipe_blended_frames] part {j} flipping x (seam-gated)")
                     x_j = -x_j; y_j = -y_j
 
+            # Alternative: always align with parent seam direction if available
+            # sp_proj = _proj_plane(_seam_vec(j, i), z_j)
+            # print(f"(((((Seam projected norm for part {j} toward parent {i}: {_np.linalg.norm(sp_proj):.6f})")
+            # if _np.linalg.norm(sp_proj) > 1e-1 and _np.dot(x_j, sp_proj) < 0.0:
+            #     if verbose:
+            #         print(f"$$$ [recipe_blended_frames] part {j} flipping x to align spin with parent seam")
+            #     x_j = -x_j; y_j = -y_j
+
             F[j] = _np.stack([x_j, y_j, z_j], axis=1)
             visited.add(j)
             q.append(j)
