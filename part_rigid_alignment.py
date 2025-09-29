@@ -871,6 +871,7 @@ def recipe_blended_frames(
                 if wsum > 0.0 and _np.linalg.norm(cons) > 1e-6:
                     c_hat = cons / (_np.linalg.norm(cons) + 1e-12)
                     if _np.dot(x_j, c_hat) < 0.0:
+                        print(f"111 [recipe_blended_frames] part {j} flipping x to align with neighbor {k2}")
                         x_j = -x_j; y_j = -y_j
 
             # Optionally align x spin so that its projection is concordant with parent seam projection
@@ -885,7 +886,7 @@ def recipe_blended_frames(
                     print(f"$$$ part {j} seam_quality = {seam_quality:.3f}, dot(x, seam_proj)={dot_x_sp:.3f}, anis_ratio={anis_ratio:.3f}, n_xpp={n_xpp:.3f}, parent_agrees={parent_agrees}")
                 if ok_len and ok_dot and ok_quality and ambiguous and not parent_agrees:
                     if verbose:
-                        print(f"$$$ [recipe_blended_frames] part {j} flipping x (seam-gated)")
+                        print(f"222 [recipe_blended_frames] part {j} flipping x (seam-gated)")
                     x_j = -x_j; y_j = -y_j
 
             # Alternative: always align with parent seam direction if available
@@ -1161,14 +1162,25 @@ DEFAULTS = dict(
     initial_axis_flip_axes=["z"],
     initial_axis_flip_include_z=False,
     initial_axis_flip_use_data_terms=False,
-    initial_axis_flip_keep_ratio=None,
+    initial_axis_flip_keep_ratio=1.0,
     initial_axis_flip_parts=None,
+    double_sided_data_terms=False,
 )
 
-def build_data_terms(source_parts, target_parts, states, keep_ratio, p2p_parts=None, flip_normals=None):
+def build_data_terms(
+    source_parts,
+    target_parts,
+    states,
+    keep_ratio,
+    p2p_parts=None,
+    flip_normals=None,
+    *,
+    double_sided: bool = False,
+):
     """Build per-part point-to-plane correspondences and return a dict k -> list[(x,y,n,w)].
     p2p_parts: optional set/list of part ids to force point-to-point (ignores target normals).
-    flip_normals: optional set/list of part ids to negate target normals (for debugging)."""
+    flip_normals: optional set/list of part ids to negate target normals (for debugging).
+    double_sided: when True, also adds target->source correspondences for a symmetric Chamfer."""
     if p2p_parts is None: p2p_parts = set()
     if flip_normals is None: flip_normals = set()
     data = {}
@@ -1178,23 +1190,39 @@ def build_data_terms(source_parts, target_parts, states, keep_ratio, p2p_parts=N
         nt = None if (k in p2p_parts) else target_parts[k].get("normals", None)
         R = states[k]["R"]; t = states[k]["t"]; c = states[k]["center"]
         Xs_t = se3_apply(R, t, Xs, center=c)
-        mask, nn, d, n = trimmed_matches(Xs_t, Xt, nt, keep_ratio=keep_ratio)
+        entries: List[Tuple[np.ndarray, np.ndarray, np.ndarray, float]] = []
+
+        mask, nn, _, n = trimmed_matches(Xs_t, Xt, nt, keep_ratio=keep_ratio)
         idx = np.where(mask)[0]
-        if idx.size == 0:
-            data[k] = []
-            continue
-        xs = Xs[idx]
-        ys = Xt[nn[idx]]
-        if n is None:
-            # point-to-point direction
-            v = ys - Xs_t[idx]
-            nrm = v / (np.linalg.norm(v, axis=1, keepdims=True) + 1e-12)
-        else:
-            nrm = n[idx]
-        if k in flip_normals:
-            nrm = -nrm
-        w = np.ones((idx.size,), dtype=np.float64)
-        data[k] = [(xs[i], ys[i], nrm[i], w[i]) for i in range(idx.size)]
+        if idx.size > 0:
+            xs = Xs[idx]
+            ys = Xt[nn[idx]]
+            if n is None:
+                # point-to-point fallback: align along connection vector
+                v = ys - Xs_t[idx]
+                nrm = v / (np.linalg.norm(v, axis=1, keepdims=True) + 1e-12)
+            else:
+                nrm = n[idx]
+            if k in flip_normals:
+                nrm = -nrm
+            entries.extend((xs[i], ys[i], nrm[i], 1.0) for i in range(idx.size))
+
+        if double_sided:
+            mask_rev, nn_rev, _, _ = trimmed_matches(Xt, Xs_t, None, keep_ratio=keep_ratio)
+            idx_rev = np.where(mask_rev)[0]
+            if idx_rev.size > 0:
+                xs_rev = Xs[nn_rev[idx_rev]]
+                ys_rev = Xt[idx_rev]
+                if nt is None:
+                    v_rev = ys_rev - Xs_t[nn_rev[idx_rev]]
+                    nrm_rev = v_rev / (np.linalg.norm(v_rev, axis=1, keepdims=True) + 1e-12)
+                else:
+                    nrm_rev = nt[idx_rev]
+                if k in flip_normals:
+                    nrm_rev = -nrm_rev
+                entries.extend((xs_rev[i], ys_rev[i], nrm_rev[i], 1.0) for i in range(idx_rev.size))
+
+        data[k] = entries
     return data
 
 def build_smooth_terms(part_graph, states, smooth_lambda):
@@ -1240,6 +1268,7 @@ def total_cost(parts_keys, states, data_terms, smooth_terms, boundary_terms, pri
         for (x, y, n, w) in entries:
             r = n.dot(se3_apply(R,t,x[None,:],center=c)[0] - y)
             cost += w * (r*r)
+    print(f"333 Data cost: {cost:.6f}")
     # smooth
     for (i, j, w_s, ci, cj) in smooth_terms:
         Ri = states[i]["R"]; ti = states[i]["t"]
@@ -1308,6 +1337,7 @@ def _search_initial_axis_flips(
             keep_ratio_eval,
             p2p_parts=p2p_parts,
             flip_normals=flip_normals,
+            double_sided=cfg.get("double_sided_data_terms", False),
         ) if include_data_terms else {}
         return total_cost(parts_keys, candidate_states, data_terms, smooth_terms, boundary_terms, prior_terms)
 
@@ -1450,6 +1480,7 @@ def estimate_part_rigid_transforms(source_parts, target_parts, part_graph, sourc
                 # "prefer_parent_for_spin": False,
                 "blend_spin_cues": True,
                 "blend_include_neighbors": False,
+                "neighbor_consensus_sign": False,
             }
         )
         Ftgt = recipe_blended_frames(
@@ -1465,6 +1496,7 @@ def estimate_part_rigid_transforms(source_parts, target_parts, part_graph, sourc
                 # "prefer_parent_for_spin": False,
                 "blend_spin_cues": True,
                 "blend_include_neighbors": False,
+                "neighbor_consensus_sign": False,
             }
         )
         for k in source_parts.keys():
@@ -1645,6 +1677,7 @@ def estimate_part_rigid_transforms(source_parts, target_parts, part_graph, sourc
             keep_ratio,
             p2p_parts=p2p_parts,
             flip_normals=flip_normals,
+            double_sided=cfg.get("double_sided_data_terms", False),
         )
         # Optional per-part diagnostics
         for k in debug_parts:
@@ -2252,7 +2285,7 @@ if __name__ == "__main__":
     log_dir = "fit_pointcloud_logs"
     exp_dir = f"smpl_rigid"
     exp_id = sample_name
-    exp_sub_dir = f"exp_{exp_id}_8"
+    exp_sub_dir = f"exp_{exp_id}_9"
     log_dir = os.path.join(log_dir, exp_dir, exp_sub_dir)
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
@@ -2327,6 +2360,8 @@ if __name__ == "__main__":
         debug_plot=True,
         # flip_normals=["left_lower_arm", "right_lower_arm"],
         initial_axis_flip_enabled=True,
+        initial_axis_flip_use_data_terms=True,
+        double_sided_data_terms=True,
     )
 
     rng_source = np.random.default_rng(seed_base)
