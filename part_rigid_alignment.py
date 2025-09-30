@@ -30,7 +30,8 @@ import copy
 import itertools
 import os
 import shutil
-from typing import Any, List, Tuple
+import warnings
+from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import trimesh
 
@@ -120,26 +121,24 @@ def _clone_states(states):
 def _axis_flip_matrix(axis: str) -> np.ndarray:
     axis = axis.lower()
     if axis == "x":
-        return np.diag([1.0, -1.0, -1.0])
+        return np.diag([1.0, -1.0, -1.0])  # keep +X, flip Y/Z
     if axis == "y":
-        return np.diag([-1.0, 1.0, -1.0])
+        return np.diag([-1.0, 1.0, -1.0])  # keep +Y, flip X/Z
     if axis == "z":
-        return np.diag([-1.0, -1.0, 1.0])
+        return np.diag([-1.0, -1.0, 1.0])  # keep +Z, flip X/Y
     raise ValueError(f"Unsupported axis '{axis}' for flip test")
 
 
 def _enumerate_flip_mats(axes):
     axes = [a.lower() for a in axes if a]
-    if not axes:
-        return [np.eye(3)]
-    mats = []
-    for mask in itertools.product([0, 1], repeat=len(axes)):
-        M = np.eye(3)
-        for axis, flag in zip(axes, mask):
-            if flag:
-                M = _axis_flip_matrix(axis) @ M
-        if not any(np.allclose(M, existing) for existing in mats):
+    mats = [np.eye(3)]
+    seen = {tuple(np.eye(3).reshape(-1))}
+    for axis in axes:
+        M = _axis_flip_matrix(axis)
+        key = tuple(np.round(M, decimals=8).reshape(-1))
+        if key not in seen:
             mats.append(M)
+            seen.add(key)
     return mats
 
 # -------------------------------
@@ -179,6 +178,88 @@ def trimmed_matches(src_pts_t, tgt_pts, tgt_nrm=None, keep_ratio=0.8):
         return mask, nn, d, tgt_nrm[nn]
     else:
         return mask, nn, d, None
+
+
+def sinkhorn_matches(
+    src_pts_t: np.ndarray,
+    tgt_pts: np.ndarray,
+    *,
+    keep_ratio: float = 0.8,
+    src_normals: Optional[np.ndarray] = None,
+    tgt_normals: Optional[np.ndarray] = None,
+    sinkhorn_kwargs: Optional[Dict[str, Any]] = None,
+):
+    """Optimal-transport correspondences via Sinkhorn plan (argmax per source).
+
+    Returns mask, nn indices, distances. Normals are intentionally omitted so the caller
+    can build point-to-point directions by default.
+    """
+    if src_pts_t.size == 0 or tgt_pts.size == 0:
+        mask = np.zeros(src_pts_t.shape[0], dtype=bool)
+        nn = np.zeros(src_pts_t.shape[0], dtype=np.int64)
+        d = np.zeros(src_pts_t.shape[0], dtype=np.float64)
+        return mask, nn, d
+
+    try:
+        import torch
+    except ImportError as exc:
+        raise RuntimeError("Sinkhorn-based matching requires PyTorch.") from exc
+
+    try:
+        from smpl_skinning_ot_local import sinkhorn_transport_plan as _sinkhorn_transport_plan
+    except ImportError as exc:
+        raise RuntimeError(
+            "sinkhorn_transport_plan not available; ensure smpl_skinning_ot_local.py is importable"
+        ) from exc
+
+    params = dict(sinkhorn_kwargs or {})
+    eps = params.pop("eps", 0.01)
+    tau = params.pop("tau", 0.05)
+    n_iters = params.pop("n_iters", 40)
+    pos_weight = params.pop("pos_weight", 0.75)
+    normal_weight = params.pop("normal_weight", 0.25)
+    device = params.pop("device", "cpu")
+
+    if params:
+        unknown = ", ".join(sorted(params.keys()))
+        raise ValueError(f"Unsupported sinkhorn_kwargs entries: {unknown}")
+
+    device = torch.device(device)
+
+    src_tensor = torch.as_tensor(src_pts_t, dtype=torch.float32)
+    tgt_tensor = torch.as_tensor(tgt_pts, dtype=torch.float32)
+    if src_tensor.device != device:
+        src_tensor = src_tensor.to(device)
+    if tgt_tensor.device != device:
+        tgt_tensor = tgt_tensor.to(device)
+
+    cost_pos = torch.cdist(src_tensor, tgt_tensor) ** 2
+    C = pos_weight * cost_pos
+
+    if src_normals is not None and tgt_normals is not None:
+        src_norm_tensor = torch.as_tensor(src_normals, dtype=torch.float32)
+        tgt_norm_tensor = torch.as_tensor(tgt_normals, dtype=torch.float32)
+        if src_norm_tensor.device != device:
+            src_norm_tensor = src_norm_tensor.to(device)
+        if tgt_norm_tensor.device != device:
+            tgt_norm_tensor = tgt_norm_tensor.to(device)
+        cost_normal = torch.cdist(src_norm_tensor, tgt_norm_tensor) ** 2
+        C = C + normal_weight * cost_normal
+
+    P = _sinkhorn_transport_plan(C, eps=eps, tau=tau, n_iters=n_iters)
+    nn_indices = torch.argmax(P, dim=1)
+
+    nn = nn_indices.detach().cpu().numpy().astype(np.int64)
+    diffs = src_pts_t - tgt_pts[nn]
+    d = np.linalg.norm(diffs, axis=1)
+
+    keep_ratio_clamped = float(np.clip(keep_ratio, 0.0, 1.0))
+    if keep_ratio_clamped <= 0.0:
+        q = d.min() if d.size > 0 else 0.0
+    else:
+        q = np.quantile(d, keep_ratio_clamped)
+    mask = d <= q
+    return mask, nn, d
 
 # -------------------------------
 # System assembly (Gauss-Newton)
@@ -1164,7 +1245,11 @@ DEFAULTS = dict(
     initial_axis_flip_use_data_terms=False,
     initial_axis_flip_keep_ratio=1.0,
     initial_axis_flip_parts=None,
+    initial_axis_flip_debug_plotly=False,
     double_sided_data_terms=False,
+    use_sinkhorn_matches=False,
+    sinkhorn_kwargs=None,
+    compute_normals_on_the_fly=False,
 )
 
 def build_data_terms(
@@ -1176,31 +1261,87 @@ def build_data_terms(
     flip_normals=None,
     *,
     double_sided: bool = False,
+    use_sinkhorn_matches: bool = False,
+    sinkhorn_kwargs: Optional[Dict[str, Any]] = None,
+    compute_normals_on_the_fly: bool = False,
 ):
     """Build per-part point-to-plane correspondences and return a dict k -> list[(x,y,n,w)].
     p2p_parts: optional set/list of part ids to force point-to-point (ignores target normals).
     flip_normals: optional set/list of part ids to negate target normals (for debugging).
-    double_sided: when True, also adds target->source correspondences for a symmetric Chamfer."""
+    double_sided: when True, also adds target->source correspondences for a symmetric Chamfer.
+    use_sinkhorn_matches: toggle to compute correspondences via Sinkhorn transport (argmax per source).
+    sinkhorn_kwargs: optional dict of parameters for sinkhorn_matches (e.g. eps, tau, n_iters).
+    compute_normals_on_the_fly: when True, estimate normals for transformed source points per part.
+    """
     if p2p_parts is None: p2p_parts = set()
     if flip_normals is None: flip_normals = set()
     data = {}
     for k in source_parts.keys():
         Xs = source_parts[k]["points"]
         Xt = target_parts[k]["points"]
-        nt = None if (k in p2p_parts) else target_parts[k].get("normals", None)
+        ns = source_parts[k].get("normals", None)
+        nt_full = target_parts[k].get("normals", None)
+        if ns is not None and ns.shape[0] != Xs.shape[0]:
+            ns = None
+        if nt_full is not None and nt_full.shape[0] != Xt.shape[0]:
+            nt_full = None
         R = states[k]["R"]; t = states[k]["t"]; c = states[k]["center"]
+        ns_world = ns @ R.T if ns is not None else None
+        nt = None if (k in p2p_parts) else nt_full
         Xs_t = se3_apply(R, t, Xs, center=c)
+        ns_estimated = None
+        if compute_normals_on_the_fly and Xs_t.shape[0] >= 3:
+            try:
+                ns_estimated = compute_normals(Xs_t)
+            except ImportError:
+                warnings.warn(
+                    "compute_normals_on_the_fly requires scikit-learn; falling back to default normals.",
+                    RuntimeWarning,
+                )
+            except Exception as exc:
+                warnings.warn(
+                    f"Failed to compute normals on-the-fly for part '{k}': {exc}.",
+                    RuntimeWarning,
+                )
+                ns_estimated = None
         entries: List[Tuple[np.ndarray, np.ndarray, np.ndarray, float]] = []
 
-        mask, nn, _, n = trimmed_matches(Xs_t, Xt, nt, keep_ratio=keep_ratio)
+        if use_sinkhorn_matches:
+            mask, nn, _ = sinkhorn_matches(
+                Xs_t,
+                Xt,
+                keep_ratio=keep_ratio,
+                src_normals=None if (k in p2p_parts) else (ns_estimated if ns_estimated is not None else ns_world),
+                tgt_normals=nt,
+                sinkhorn_kwargs=sinkhorn_kwargs,
+            )
+            n = None
+        else:
+            mask, nn, _, n = trimmed_matches(Xs_t, Xt, nt, keep_ratio=keep_ratio)
         idx = np.where(mask)[0]
         if idx.size > 0:
             xs = Xs[idx]
             ys = Xt[nn[idx]]
-            if n is None:
-                # point-to-point fallback: align along connection vector
-                v = ys - Xs_t[idx]
-                nrm = v / (np.linalg.norm(v, axis=1, keepdims=True) + 1e-12)
+            if n is None or use_sinkhorn_matches:
+                candidate_normals = None
+                if ns_estimated is not None:
+                    candidate_normals = ns_estimated[idx]
+                elif ns_world is not None:
+                    candidate_normals = ns_world[idx]
+                if candidate_normals is not None:
+                    nrm = candidate_normals.copy()
+                    norms = np.linalg.norm(nrm, axis=1, keepdims=True)
+                    valid = norms[:, 0] > 1e-12
+                    if np.any(valid):
+                        nrm[valid] /= norms[valid]
+                    if not np.all(valid):
+                        v = ys - Xs_t[idx]
+                        v_norm = np.linalg.norm(v, axis=1, keepdims=True) + 1e-12
+                        nrm[~valid] = v[~valid] / v_norm[~valid]
+                else:
+                    # point-to-point fallback: align along connection vector
+                    v = ys - Xs_t[idx]
+                    nrm = v / (np.linalg.norm(v, axis=1, keepdims=True) + 1e-12)
             else:
                 nrm = n[idx]
             if k in flip_normals:
@@ -1208,14 +1349,40 @@ def build_data_terms(
             entries.extend((xs[i], ys[i], nrm[i], 1.0) for i in range(idx.size))
 
         if double_sided:
-            mask_rev, nn_rev, _, _ = trimmed_matches(Xt, Xs_t, None, keep_ratio=keep_ratio)
+            if use_sinkhorn_matches:
+                mask_rev, nn_rev, _ = sinkhorn_matches(
+                    Xt,
+                    Xs_t,
+                    keep_ratio=keep_ratio,
+                    src_normals=None if (k in p2p_parts) else nt_full,
+                    tgt_normals=None if (k in p2p_parts) else (ns_estimated if ns_estimated is not None else ns_world),
+                    sinkhorn_kwargs=sinkhorn_kwargs,
+                )
+            else:
+                mask_rev, nn_rev, _, _ = trimmed_matches(Xt, Xs_t, None, keep_ratio=keep_ratio)
             idx_rev = np.where(mask_rev)[0]
             if idx_rev.size > 0:
                 xs_rev = Xs[nn_rev[idx_rev]]
                 ys_rev = Xt[idx_rev]
-                if nt is None:
-                    v_rev = ys_rev - Xs_t[nn_rev[idx_rev]]
-                    nrm_rev = v_rev / (np.linalg.norm(v_rev, axis=1, keepdims=True) + 1e-12)
+                if use_sinkhorn_matches or nt is None:
+                    candidate_normals_rev = None
+                    if ns_estimated is not None:
+                        candidate_normals_rev = ns_estimated[nn_rev[idx_rev]]
+                    elif ns_world is not None:
+                        candidate_normals_rev = ns_world[nn_rev[idx_rev]]
+                    if candidate_normals_rev is not None:
+                        nrm_rev = candidate_normals_rev.copy()
+                        norms_rev = np.linalg.norm(nrm_rev, axis=1, keepdims=True)
+                        valid_rev = norms_rev[:, 0] > 1e-12
+                        if np.any(valid_rev):
+                            nrm_rev[valid_rev] /= norms_rev[valid_rev]
+                        if not np.all(valid_rev):
+                            v_rev = ys_rev - Xs_t[nn_rev[idx_rev]]
+                            v_rev_norm = np.linalg.norm(v_rev, axis=1, keepdims=True) + 1e-12
+                            nrm_rev[~valid_rev] = v_rev[~valid_rev] / v_rev_norm[~valid_rev]
+                    else:
+                        v_rev = ys_rev - Xs_t[nn_rev[idx_rev]]
+                        nrm_rev = v_rev / (np.linalg.norm(v_rev, axis=1, keepdims=True) + 1e-12)
                 else:
                     nrm_rev = nt[idx_rev]
                 if k in flip_normals:
@@ -1312,6 +1479,23 @@ def _search_initial_axis_flips(
     if len(flip_mats) <= 1:
         return _clone_states(states), dict(improvement=0.0, original_cost=0.0, final_cost=0.0, changed_parts=[])
 
+    debug_plotly = bool(cfg.get("initial_axis_flip_debug_plotly", False))
+    go = None
+    debug_plot_dir = None
+    if debug_plotly:
+        try:
+            import plotly.graph_objects as go  # type: ignore
+        except Exception as exc:
+            warnings.warn(
+                f"Plotly not available for initial axis flip debug visualization: {exc}",
+                RuntimeWarning,
+            )
+            debug_plotly = False
+        else:
+            log_dir = cfg.get("log_dir", ".")
+            debug_plot_dir = os.path.join(log_dir, "debug_init_flip")
+            os.makedirs(debug_plot_dir, exist_ok=True)
+
     boundary_terms = build_boundary_terms(source_anchors, cfg["boundary_gamma"])
     use_boundary = len(boundary_terms) > 0
     if not include_data_terms and not use_boundary:
@@ -1338,8 +1522,89 @@ def _search_initial_axis_flips(
             p2p_parts=p2p_parts,
             flip_normals=flip_normals,
             double_sided=cfg.get("double_sided_data_terms", False),
+            use_sinkhorn_matches=cfg.get("use_sinkhorn_matches_initial", False),
+            sinkhorn_kwargs=cfg.get("sinkhorn_kwargs", None),
+            # compute_normals_on_the_fly=cfg.get("compute_normals_on_the_fly", False),
+            compute_normals_on_the_fly=False,
         ) if include_data_terms else {}
         return total_cost(parts_keys, candidate_states, data_terms, smooth_terms, boundary_terms, prior_terms)
+
+    def _debug_visualize_candidate(part_id, cand_idx, mat, best_state, cand_state, best_cost_val, cand_cost_val):
+        if not debug_plotly or go is None or debug_plot_dir is None:
+            return
+        part_data = source_parts.get(part_id)
+        if part_data is None or "points" not in part_data:
+            return
+        Xs = np.asarray(part_data["points"])
+        if Xs.size == 0:
+            return
+        target_data = target_parts.get(part_id)
+        Xt = None
+        if target_data is not None and "points" in target_data:
+            Xt = np.asarray(target_data["points"])
+
+        center_best = best_state.get("center", None)
+        center_cand = cand_state.get("center", center_best)
+        pts_best = se3_apply(best_state["R"], best_state["t"], Xs, center=center_best)
+        pts_cand = se3_apply(cand_state["R"], cand_state["t"], Xs, center=center_cand)
+
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter3d(
+                x=pts_best[:, 0],
+                y=pts_best[:, 1],
+                z=pts_best[:, 2],
+                mode="markers",
+                marker=dict(size=2.5, color="#1f77b4"),
+                name=f"best (cost={best_cost_val:.3e})",
+            )
+        )
+        fig.add_trace(
+            go.Scatter3d(
+                x=pts_cand[:, 0],
+                y=pts_cand[:, 1],
+                z=pts_cand[:, 2],
+                mode="markers",
+                marker=dict(size=2.5, color="#d62728"),
+                name=f"candidate {cand_idx} (cost={cand_cost_val:.3e})",
+            )
+        )
+        if Xt is not None and Xt.size > 0:
+            fig.add_trace(
+                go.Scatter3d(
+                    x=Xt[:, 0],
+                    y=Xt[:, 1],
+                    z=Xt[:, 2],
+                    mode="markers",
+                    marker=dict(size=2.0, color="#7f7f7f", opacity=0.5),
+                    name="target",
+                )
+            )
+
+        fig.update_layout(
+            title=f"Part {part_id} candidate {cand_idx} axis flip",
+            scene=dict(aspectmode="data"),
+            legend=dict(itemsizing="constant"),
+        )
+        fig.add_annotation(
+            text="\n".join(
+                [
+                    "Candidate flip matrix:",
+                    str(np.array_str(mat, precision=3)),
+                ]
+            ),
+            xref="paper",
+            yref="paper",
+            x=0.02,
+            y=0.02,
+            showarrow=False,
+            align="left",
+        )
+
+        part_dir = os.path.join(debug_plot_dir, str(part_id))
+        os.makedirs(part_dir, exist_ok=True)
+        out_path = os.path.join(part_dir, f"candidate_{cand_idx:02d}.html")
+        fig.write_html(out_path)
 
     working_states = _clone_states(states)
     base_cost = evaluate(working_states)
@@ -1401,12 +1666,24 @@ def _search_initial_axis_flips(
         part_best_cost = best_cost
         part_best_states = working_states
         part_changed = False
-        for mat in flip_mats[1:]:
+        for cand_idx, mat in enumerate(flip_mats[1:], start=1):
             candidate_states = _clone_states(working_states)
-            R_candidate = mat @ candidate_states[part]["R"]
+            R_current = candidate_states[part]["R"]
+            R_candidate = R_current @ mat.T
             candidate_states[part]["R"] = R_candidate
             candidate_states[part]["R0"] = R_candidate.copy()
+            best_state_before = part_best_states[part]
+            part_best_cost_before = part_best_cost
             candidate_cost = evaluate(candidate_states)
+            _debug_visualize_candidate(
+                part,
+                cand_idx,
+                mat,
+                best_state_before,
+                candidate_states[part],
+                part_best_cost_before,
+                candidate_cost,
+            )
             if print_details:
                 print(f"@@@ [init axis flip] part {part} try flip mat:\n{mat}\n  cost = {candidate_cost:.6e} (best {part_best_cost:.6e})")
             if candidate_cost + 1e-9 < part_best_cost:
@@ -1436,6 +1713,7 @@ def estimate_part_rigid_transforms(source_parts, target_parts, part_graph, sourc
     """Main entry: returns dict part_id -> {'R','t'}"""
     if params is None: params = {}
     cfg = DEFAULTS.copy(); cfg.update(params or {})
+    cfg.setdefault("log_dir", log_dir)
     parts_keys = list(source_parts.keys())
 
     # init
@@ -1579,12 +1857,46 @@ def estimate_part_rigid_transforms(source_parts, target_parts, part_graph, sourc
         # lightweight stats on matches for one part
         Xs = source_parts[k]["points"]
         Xt = target_parts[k]["points"]
-        nt = None if (k in p2p_parts) else target_parts[k].get("normals", None)
+        ns = source_parts[k].get("normals", None)
+        nt_full = target_parts[k].get("normals", None)
+        if ns is not None and ns.shape[0] != Xs.shape[0]:
+            ns = None
+        if nt_full is not None and nt_full.shape[0] != Xt.shape[0]:
+            nt_full = None
         R = states_k["R"]
         t = states_k["t"]
         c = states_k["center"]
+        ns_world = ns @ R.T if ns is not None else None
+        nt = None if (k in p2p_parts) else nt_full
         Xs_t = se3_apply(R, t, Xs, center=c)
-        mask, nn, d, n = trimmed_matches(Xs_t, Xt, nt, keep_ratio=keep_ratio)
+        ns_estimated = None
+        if cfg.get("compute_normals_on_the_fly", False) and Xs_t.shape[0] >= 3:
+            try:
+                ns_estimated = compute_normals(Xs_t)
+            except ImportError:
+                warnings.warn(
+                    "compute_normals_on_the_fly requires scikit-learn; falling back to default normals.",
+                    RuntimeWarning,
+                )
+            except Exception as exc:
+                warnings.warn(
+                    f"Failed to compute normals on-the-fly for part '{k}' during debug: {exc}.",
+                    RuntimeWarning,
+                )
+                ns_estimated = None
+
+        if cfg.get("use_sinkhorn_matches", False):
+            mask, nn, d = sinkhorn_matches(
+                Xs_t,
+                Xt,
+                keep_ratio=keep_ratio,
+                src_normals=None if (k in p2p_parts) else (ns_estimated if ns_estimated is not None else ns_world),
+                tgt_normals=nt,
+                sinkhorn_kwargs=cfg.get("sinkhorn_kwargs", None),
+            )
+            n = None
+        else:
+            mask, nn, d, n = trimmed_matches(Xs_t, Xt, nt, keep_ratio=keep_ratio)
         kept = int(mask.sum())
         total = int(len(mask))
         if kept == 0:
@@ -1594,8 +1906,24 @@ def estimate_part_rigid_transforms(source_parts, target_parts, part_graph, sourc
         msgs = f"[it {it:02d}] [{k}] kept={kept}/{total}  d(med/mean/95p)={np.median(d_kept):.4f}/{d_kept.mean():.4f}/{np.quantile(d_kept,0.95):.4f}"
         # directional agreement if normals available or synthetic
         if n is None:
-            v = Xt[nn[mask]] - Xs_t[mask]
-            nrm = v / (np.linalg.norm(v, axis=1, keepdims=True) + 1e-12)
+            candidate_normals = None
+            if ns_estimated is not None:
+                candidate_normals = ns_estimated[mask]
+            elif ns_world is not None:
+                candidate_normals = ns_world[mask]
+            if candidate_normals is not None:
+                nrm = candidate_normals.copy()
+                norms = np.linalg.norm(nrm, axis=1, keepdims=True)
+                valid = norms[:, 0] > 1e-12
+                if np.any(valid):
+                    nrm[valid] /= norms[valid]
+                if not np.all(valid):
+                    v = Xt[nn[mask]] - Xs_t[mask]
+                    v_norm = np.linalg.norm(v, axis=1, keepdims=True) + 1e-12
+                    nrm[~valid] = v[~valid] / v_norm[~valid]
+            else:
+                v = Xt[nn[mask]] - Xs_t[mask]
+                nrm = v / (np.linalg.norm(v, axis=1, keepdims=True) + 1e-12)
         else:
             nrm = n[mask]
         cos = np.sum(
@@ -1678,6 +2006,9 @@ def estimate_part_rigid_transforms(source_parts, target_parts, part_graph, sourc
             p2p_parts=p2p_parts,
             flip_normals=flip_normals,
             double_sided=cfg.get("double_sided_data_terms", False),
+            use_sinkhorn_matches=cfg.get("use_sinkhorn_matches", False),
+            sinkhorn_kwargs=cfg.get("sinkhorn_kwargs", None),
+            compute_normals_on_the_fly=cfg.get("compute_normals_on_the_fly", False),
         )
         # Optional per-part diagnostics
         for k in debug_parts:
@@ -2252,7 +2583,7 @@ if __name__ == "__main__":
         for name in part_names
     }
 
-    sample_name = "sample_2"
+    sample_name = "sample_0"
     ref_obj_mesh = trimesh.load(
         f"/NAS/spa176/skeleton-free-pose-transfer/demo/smpl_pose_0/{sample_name}.obj",
         process=False,
@@ -2285,7 +2616,7 @@ if __name__ == "__main__":
     log_dir = "fit_pointcloud_logs"
     exp_dir = f"smpl_rigid"
     exp_id = sample_name
-    exp_sub_dir = f"exp_{exp_id}_9"
+    exp_sub_dir = f"exp_{exp_id}_2"
     log_dir = os.path.join(log_dir, exp_dir, exp_sub_dir)
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
@@ -2331,6 +2662,7 @@ if __name__ == "__main__":
     solver_params = dict(
         outer_iters=15,
         keep_ratio_schedule=[0.7, 0.8, 0.85, 0.9],
+        # keep_ratio_schedule=[1.0],
         # smooth_lambda=20.0,
         # boundary_gamma=80.0,
         # prior_mu=10.0,
@@ -2353,15 +2685,43 @@ if __name__ == "__main__":
         up_hint=up_hint,
         z_mode="seam_centroid_to_centroid_direction",
         random_seed=seed_base,
-        # p2p_parts=["left_lower_arm", "right_lower_arm"],
+        p2p_parts=[
+            "left_upper_leg", 
+            "right_upper_leg", 
+            "left_lower_arm", 
+            "right_lower_arm",
+            "left_upper_arm",
+            "right_upper_arm",
+            "left_lower_leg",
+            "right_lower_leg",
+        ],
         # debug_parts=["left_lower_arm", "right_lower_arm"],
-        debug_parts=["left_upper_leg", "right_upper_leg"],
+        debug_parts=[
+            "left_upper_leg",
+            "right_upper_leg",
+            "left_lower_arm",
+            "right_lower_arm",
+            "left_upper_arm",
+            "right_upper_arm",
+            "left_lower_leg",
+            "right_lower_leg",
+        ],
         # debug_parts=["head_neck"],
         debug_plot=True,
         # flip_normals=["left_lower_arm", "right_lower_arm"],
         initial_axis_flip_enabled=True,
         initial_axis_flip_use_data_terms=True,
         double_sided_data_terms=True,
+        use_sinkhorn_matches=True,
+        use_sinkhorn_matches_initial=False,
+        sinkhorn_kwargs=dict(
+            eps=1e-2,
+            tau=5e-1,
+            n_iters=40,
+        ),
+        compute_normals_on_the_fly=True,
+        initial_axis_flip_debug_plotly=True,
+        initial_axis_flip_axes=["x", "y", "z"],
     )
 
     rng_source = np.random.default_rng(seed_base)
