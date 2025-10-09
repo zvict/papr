@@ -1248,8 +1248,13 @@ DEFAULTS = dict(
     initial_axis_flip_debug_plotly=False,
     double_sided_data_terms=False,
     use_sinkhorn_matches=False,
+    use_center_proximity_weights=False,
+    use_center_proximity_weights_initial=True,
     sinkhorn_kwargs=None,
     compute_normals_on_the_fly=False,
+    normal_agreement_weight=0.0,
+    initial_axis_flip_normal_agreement_weight=None,
+    initial_axis_flip_seam_normal_weight=0.0,
 )
 
 def build_data_terms(
@@ -1264,6 +1269,8 @@ def build_data_terms(
     use_sinkhorn_matches: bool = False,
     sinkhorn_kwargs: Optional[Dict[str, Any]] = None,
     compute_normals_on_the_fly: bool = False,
+    normal_agreement_weight: float = 0.0,
+    use_center_proximity_weights: bool = False,
 ):
     """Build per-part point-to-plane correspondences and return a dict k -> list[(x,y,n,w)].
     p2p_parts: optional set/list of part ids to force point-to-point (ignores target normals).
@@ -1272,9 +1279,62 @@ def build_data_terms(
     use_sinkhorn_matches: toggle to compute correspondences via Sinkhorn transport (argmax per source).
     sinkhorn_kwargs: optional dict of parameters for sinkhorn_matches (e.g. eps, tau, n_iters).
     compute_normals_on_the_fly: when True, estimate normals for transformed source points per part.
+    normal_agreement_weight: when >0, upweights misaligned matches by α·(1-|n_s·n_t|).
+    When use_center_proximity_weights is True and Sinkhorn correspondences are not used, per-point
+    residuals are additionally reweighted by a smooth radial falloff from the part center so that
+    distant points get lower influence.
     """
     if p2p_parts is None: p2p_parts = set()
     if flip_normals is None: flip_normals = set()
+    normal_agreement_weight = float(normal_agreement_weight)
+    use_normal_penalty = normal_agreement_weight > 0.0
+
+    def _safe_unit(vecs: np.ndarray) -> np.ndarray:
+        arr = np.asarray(vecs, dtype=np.float64)
+        out = np.zeros_like(arr)
+        if arr.size == 0:
+            return out
+        norms = np.linalg.norm(arr, axis=1, keepdims=True)
+        valid = norms[:, 0] > 1e-12
+        if np.any(valid):
+            out[valid] = arr[valid] / norms[valid]
+        return out
+
+    def _unit_or_fallback(vecs: Optional[np.ndarray], fallback: np.ndarray) -> np.ndarray:
+        if fallback.size == 0:
+            return fallback.copy()
+        if vecs is None:
+            return fallback.copy()
+        arr = np.asarray(vecs, dtype=np.float64)
+        out = fallback.copy()
+        norms = np.linalg.norm(arr, axis=1, keepdims=True)
+        valid = norms[:, 0] > 1e-12
+        if np.any(valid):
+            out[valid] = arr[valid] / norms[valid]
+        return out
+
+    def _center_distance_falloff(distances: np.ndarray) -> np.ndarray:
+        """Return smooth weights in [min_w, 1] that decay with distance from part center."""
+        arr = np.asarray(distances, dtype=np.float64)
+        if arr.size == 0:
+            return np.zeros_like(arr, dtype=np.float64)
+        arr = np.clip(arr, 0.0, None)  # distances should be non-negative
+        finite = np.isfinite(arr)
+        if not np.any(finite):
+            return np.ones_like(arr, dtype=np.float64)
+        # Use a high-percentile radius so typical inliers stay near weight 1.
+        radius = np.quantile(arr[finite], 0.75)
+        if not np.isfinite(radius) or radius <= 1e-9:
+            radius = np.max(arr[finite])
+        if not np.isfinite(radius) or radius <= 1e-9:
+            radius = 1.0
+        ratio = arr / (radius + 1e-9)
+        weights = 1.0 / (1.0 + ratio**4)  # gentle falloff, close points stay near 1
+        min_w = 0.1
+        if min_w > 0.0:
+            weights = np.clip(weights, min_w, 1.0)
+        return weights
+
     data = {}
     for k in source_parts.keys():
         Xs = source_parts[k]["points"]
@@ -1304,6 +1364,22 @@ def build_data_terms(
                     RuntimeWarning,
                 )
                 ns_estimated = None
+        center_weights = None
+        if (
+            use_center_proximity_weights
+            and not use_sinkhorn_matches
+            and Xs.shape[0] > 0
+        ):
+            if c is not None:
+                center_ref = np.asarray(c, dtype=np.float64)
+            else:
+                centroid = source_parts[k].get("centroid", None)
+                if centroid is None:
+                    center_ref = np.asarray(Xs.mean(axis=0), dtype=np.float64)
+                else:
+                    center_ref = np.asarray(centroid, dtype=np.float64)
+            dists_to_center = np.linalg.norm(Xs - center_ref[None, :], axis=1)
+            center_weights = _center_distance_falloff(dists_to_center)
         entries: List[Tuple[np.ndarray, np.ndarray, np.ndarray, float]] = []
 
         if use_sinkhorn_matches:
@@ -1322,31 +1398,46 @@ def build_data_terms(
         if idx.size > 0:
             xs = Xs[idx]
             ys = Xt[nn[idx]]
-            if n is None or use_sinkhorn_matches:
-                candidate_normals = None
-                if ns_estimated is not None:
-                    candidate_normals = ns_estimated[idx]
-                elif ns_world is not None:
-                    candidate_normals = ns_world[idx]
-                if candidate_normals is not None:
-                    nrm = candidate_normals.copy()
-                    norms = np.linalg.norm(nrm, axis=1, keepdims=True)
-                    valid = norms[:, 0] > 1e-12
-                    if np.any(valid):
-                        nrm[valid] /= norms[valid]
-                    if not np.all(valid):
-                        v = ys - Xs_t[idx]
-                        v_norm = np.linalg.norm(v, axis=1, keepdims=True) + 1e-12
-                        nrm[~valid] = v[~valid] / v_norm[~valid]
-                else:
-                    # point-to-point fallback: align along connection vector
-                    v = ys - Xs_t[idx]
-                    nrm = v / (np.linalg.norm(v, axis=1, keepdims=True) + 1e-12)
-            else:
-                nrm = n[idx]
+            diff = ys - Xs_t[idx]
+            diff_unit = _safe_unit(diff)
+
+            src_raw = None
+            if ns_estimated is not None:
+                src_raw = ns_estimated[idx]
+            elif ns_world is not None:
+                src_raw = ns_world[idx]
+
+            tgt_raw = None
+            if nt is not None:
+                tgt_raw = nt[nn[idx]]
+
+            plane_raw = src_raw if (n is None or use_sinkhorn_matches) else n[idx]
+            plane = _unit_or_fallback(plane_raw, diff_unit)
             if k in flip_normals:
-                nrm = -nrm
-            entries.extend((xs[i], ys[i], nrm[i], 1.0) for i in range(idx.size))
+                plane = -plane
+
+            weights = np.ones(idx.size, dtype=np.float64)
+            if center_weights is not None:
+                weights *= center_weights[idx]
+            # if use_normal_penalty:
+            #     src_for_weight = _unit_or_fallback(src_raw, diff_unit)
+            #     tgt_fallback = diff_unit
+            #     tgt_for_weight = None if tgt_raw is None else np.array(tgt_raw, dtype=np.float64, copy=True)
+            #     if k in flip_normals:
+            #         tgt_fallback = -tgt_fallback
+            #         if tgt_for_weight is not None:
+            #             tgt_for_weight = -tgt_for_weight
+            #     tgt_for_weight_unit = _unit_or_fallback(tgt_for_weight, tgt_fallback)
+            #     src_valid = np.linalg.norm(src_for_weight, axis=1) > 1e-8
+            #     tgt_valid = np.linalg.norm(tgt_for_weight_unit, axis=1) > 1e-8
+            #     valid = src_valid & tgt_valid
+            #     dots = np.ones(idx.size, dtype=np.float64)
+            #     if np.any(valid):
+            #         dots_valid = np.sum(src_for_weight[valid] * tgt_for_weight_unit[valid], axis=1)
+            #         dots[valid] = np.clip(np.abs(dots_valid), 0.0, 1.0)
+            #     weights += normal_agreement_weight * (1.0 - dots)
+
+            entries.extend((xs[i], ys[i], plane[i], float(weights[i])) for i in range(idx.size))
 
         if double_sided:
             if use_sinkhorn_matches:
@@ -1364,30 +1455,50 @@ def build_data_terms(
             if idx_rev.size > 0:
                 xs_rev = Xs[nn_rev[idx_rev]]
                 ys_rev = Xt[idx_rev]
+                diff_rev = ys_rev - Xs_t[nn_rev[idx_rev]]
+                diff_rev_unit = _safe_unit(diff_rev)
+
+                src_raw_rev = None
+                if ns_estimated is not None:
+                    src_raw_rev = ns_estimated[nn_rev[idx_rev]]
+                elif ns_world is not None:
+                    src_raw_rev = ns_world[nn_rev[idx_rev]]
+
+                tgt_raw_rev = None
+                if not (k in p2p_parts) and nt_full is not None:
+                    tgt_raw_rev = nt_full[idx_rev]
+
                 if use_sinkhorn_matches or nt is None:
-                    candidate_normals_rev = None
-                    if ns_estimated is not None:
-                        candidate_normals_rev = ns_estimated[nn_rev[idx_rev]]
-                    elif ns_world is not None:
-                        candidate_normals_rev = ns_world[nn_rev[idx_rev]]
-                    if candidate_normals_rev is not None:
-                        nrm_rev = candidate_normals_rev.copy()
-                        norms_rev = np.linalg.norm(nrm_rev, axis=1, keepdims=True)
-                        valid_rev = norms_rev[:, 0] > 1e-12
-                        if np.any(valid_rev):
-                            nrm_rev[valid_rev] /= norms_rev[valid_rev]
-                        if not np.all(valid_rev):
-                            v_rev = ys_rev - Xs_t[nn_rev[idx_rev]]
-                            v_rev_norm = np.linalg.norm(v_rev, axis=1, keepdims=True) + 1e-12
-                            nrm_rev[~valid_rev] = v_rev[~valid_rev] / v_rev_norm[~valid_rev]
-                    else:
-                        v_rev = ys_rev - Xs_t[nn_rev[idx_rev]]
-                        nrm_rev = v_rev / (np.linalg.norm(v_rev, axis=1, keepdims=True) + 1e-12)
+                    plane_raw_rev = src_raw_rev
                 else:
-                    nrm_rev = nt[idx_rev]
+                    plane_raw_rev = nt[idx_rev]
+
+                plane_rev = _unit_or_fallback(plane_raw_rev, diff_rev_unit)
                 if k in flip_normals:
-                    nrm_rev = -nrm_rev
-                entries.extend((xs_rev[i], ys_rev[i], nrm_rev[i], 1.0) for i in range(idx_rev.size))
+                    plane_rev = -plane_rev
+
+                weights_rev = np.ones(idx_rev.size, dtype=np.float64)
+                if center_weights is not None:
+                    weights_rev *= center_weights[nn_rev[idx_rev]]
+                # if use_normal_penalty:
+                #     src_rev_for_weight = _unit_or_fallback(src_raw_rev, diff_rev_unit)
+                #     tgt_rev_fallback = diff_rev_unit
+                #     tgt_rev_for_weight = None if tgt_raw_rev is None else np.array(tgt_raw_rev, dtype=np.float64, copy=True)
+                #     if k in flip_normals:
+                #         tgt_rev_fallback = -tgt_rev_fallback
+                #         if tgt_rev_for_weight is not None:
+                #             tgt_rev_for_weight = -tgt_rev_for_weight
+                #     tgt_rev_unit = _unit_or_fallback(tgt_rev_for_weight, tgt_rev_fallback)
+                #     src_valid_rev = np.linalg.norm(src_rev_for_weight, axis=1) > 1e-8
+                #     tgt_valid_rev = np.linalg.norm(tgt_rev_unit, axis=1) > 1e-8
+                #     valid_rev = src_valid_rev & tgt_valid_rev
+                #     dots_rev = np.ones(idx_rev.size, dtype=np.float64)
+                #     if np.any(valid_rev):
+                #         dots_valid_rev = np.sum(src_rev_for_weight[valid_rev] * tgt_rev_unit[valid_rev], axis=1)
+                #         dots_rev[valid_rev] = np.clip(np.abs(dots_valid_rev), 0.0, 1.0)
+                #     weights_rev += normal_agreement_weight * (1.0 - dots_rev)
+
+                entries.extend((xs_rev[i], ys_rev[i], plane_rev[i], float(weights_rev[i])) for i in range(idx_rev.size))
 
         data[k] = entries
     return data
@@ -1463,6 +1574,7 @@ def _search_initial_axis_flips(
     source_parts,
     target_parts,
     source_anchors,
+    target_anchors,
     cfg,
     keep_ratio=None,
     axes=None,
@@ -1509,6 +1621,53 @@ def _search_initial_axis_flips(
 
     p2p_parts = set(p2p_parts or [])
     flip_normals = set(flip_normals or [])
+    # normal_agreement_weight_flip = cfg.get("initial_axis_flip_normal_agreement_weight")
+    # if normal_agreement_weight_flip is None:
+    #     normal_agreement_weight_flip = cfg.get("normal_agreement_weight", 0.0)
+    # seam_normal_weight = float(cfg.get("initial_axis_flip_seam_normal_weight", 0.0))
+
+    # seam_penalty_entries: List[Dict[str, Any]] = []
+    # seam_penalty_active = False
+    # if seam_normal_weight > 0.0 and source_anchors:
+    #     seen_pairs = set()
+    #     for (i, j), anchors_ij in source_anchors.items():
+    #         if i not in states or j not in states:
+    #             continue
+    #         key = tuple(sorted((i, j)))
+    #         if key in seen_pairs:
+    #             continue
+
+    #         anchors_ij_arr = None if anchors_ij is None else np.asarray(anchors_ij)
+    #         anchors_ji_raw = source_anchors.get((j, i))
+    #         anchors_ji_arr = None if anchors_ji_raw is None else np.asarray(anchors_ji_raw)
+    #         target_normal = None
+    #         if target_anchors is not None:
+    #             target_pts = target_anchors.get((i, j))
+    #             if target_pts is None:
+    #                 target_pts = target_anchors.get((j, i))
+    #             if target_pts is not None:
+    #                 target_pts = np.asarray(target_pts)
+    #             if target_pts is not None and target_pts.shape[0] >= 3:
+    #                 try:
+    #                     target_normal = _fit_plane_normal(target_pts)
+    #                 except Exception:
+    #                     target_normal = None
+
+    #         entry = dict(
+    #             part_i=i,
+    #             part_j=j,
+    #             anchors_ij=anchors_ij_arr,
+    #             anchors_ji=anchors_ji_arr,
+    #             target_normal=target_normal,
+    #             weight=1.0,
+    #         )
+    #         seam_penalty_entries.append(entry)
+    #         seen_pairs.add(key)
+
+    #     seam_penalty_active = any(e.get("target_normal") is not None for e in seam_penalty_entries)
+    #     if not seam_penalty_active:
+    #         seam_penalty_entries.clear()
+    #         seam_normal_weight = 0.0
 
     smooth_terms = []
     prior_terms = []
@@ -1526,8 +1685,54 @@ def _search_initial_axis_flips(
             sinkhorn_kwargs=cfg.get("sinkhorn_kwargs", None),
             # compute_normals_on_the_fly=cfg.get("compute_normals_on_the_fly", False),
             compute_normals_on_the_fly=False,
+            # normal_agreement_weight=normal_agreement_weight_flip,
+            use_center_proximity_weights=cfg.get("use_center_proximity_weights_initial", True),
         ) if include_data_terms else {}
-        return total_cost(parts_keys, candidate_states, data_terms, smooth_terms, boundary_terms, prior_terms)
+        cost_val = total_cost(parts_keys, candidate_states, data_terms, smooth_terms, boundary_terms, prior_terms)
+
+        # if seam_penalty_active:
+        #     penalty = 0.0
+        #     for entry in seam_penalty_entries:
+        #         pts_world = []
+        #         anchors_i = entry.get("anchors_ij")
+        #         if anchors_i is not None and anchors_i.shape[0] >= 3:
+        #             pts_world.append(
+        #                 se3_apply(
+        #                     candidate_states[entry["part_i"]]["R"],
+        #                     candidate_states[entry["part_i"]]["t"],
+        #                     anchors_i,
+        #                     center=candidate_states[entry["part_i"]]["center"],
+        #                 )
+        #             )
+
+        #         anchors_j = entry.get("anchors_ji")
+        #         if anchors_j is not None and anchors_j.shape[0] >= 3:
+        #             pts_world.append(
+        #                 se3_apply(
+        #                     candidate_states[entry["part_j"]]["R"],
+        #                     candidate_states[entry["part_j"]]["t"],
+        #                     anchors_j,
+        #                     center=candidate_states[entry["part_j"]]["center"],
+        #                 )
+        #             )
+
+        #         if not pts_world:
+        #             continue
+        #         pts_cat = np.concatenate(pts_world, axis=0)
+        #         if pts_cat.shape[0] < 3:
+        #             continue
+        #         try:
+        #             cand_normal = _fit_plane_normal(pts_cat)
+        #         except Exception:
+        #             continue
+        #         ref_normal = entry.get("target_normal")
+        #         if ref_normal is None:
+        #             continue
+        #         dot = float(np.clip(np.dot(cand_normal, ref_normal), -1.0, 1.0))
+        #         penalty += entry.get("weight", 1.0) * (1.0 - abs(dot))
+        #     cost_val += seam_normal_weight * penalty
+
+        return cost_val
 
     def _debug_visualize_candidate(part_id, cand_idx, mat, best_state, cand_state, best_cost_val, cand_cost_val):
         if not debug_plotly or go is None or debug_plot_dir is None:
@@ -1757,6 +1962,7 @@ def estimate_part_rigid_transforms(source_parts, target_parts, part_graph, sourc
                 "tau_aniso": 1.25,
                 # "prefer_parent_for_spin": False,
                 "blend_spin_cues": True,
+                "blend_spin_cues_signless": False,
                 "blend_include_neighbors": False,
                 "neighbor_consensus_sign": False,
             }
@@ -1773,6 +1979,7 @@ def estimate_part_rigid_transforms(source_parts, target_parts, part_graph, sourc
                 "tau_aniso": 1.25,
                 # "prefer_parent_for_spin": False,
                 "blend_spin_cues": True,
+                "blend_spin_cues_signless": False,
                 "blend_include_neighbors": False,
                 "neighbor_consensus_sign": False,
             }
@@ -1808,6 +2015,7 @@ def estimate_part_rigid_transforms(source_parts, target_parts, part_graph, sourc
             source_parts,
             target_parts,
             source_anchors,
+            target_anchors,
             cfg,
             keep_ratio=keep_ratio_eval,
             axes=axes_to_try,
@@ -2009,6 +2217,8 @@ def estimate_part_rigid_transforms(source_parts, target_parts, part_graph, sourc
             use_sinkhorn_matches=cfg.get("use_sinkhorn_matches", False),
             sinkhorn_kwargs=cfg.get("sinkhorn_kwargs", None),
             compute_normals_on_the_fly=cfg.get("compute_normals_on_the_fly", False),
+            normal_agreement_weight=cfg.get("normal_agreement_weight", 0.0),
+            use_center_proximity_weights=cfg.get("use_center_proximity_weights", False),
         )
         # Optional per-part diagnostics
         for k in debug_parts:
@@ -2583,7 +2793,7 @@ if __name__ == "__main__":
         for name in part_names
     }
 
-    sample_name = "sample_0"
+    sample_name = "sample_5"
     ref_obj_mesh = trimesh.load(
         f"/NAS/spa176/skeleton-free-pose-transfer/demo/smpl_pose_0/{sample_name}.obj",
         process=False,
@@ -2616,7 +2826,7 @@ if __name__ == "__main__":
     log_dir = "fit_pointcloud_logs"
     exp_dir = f"smpl_rigid"
     exp_id = sample_name
-    exp_sub_dir = f"exp_{exp_id}_2"
+    exp_sub_dir = f"exp_{exp_id}_9"
     log_dir = os.path.join(log_dir, exp_dir, exp_sub_dir)
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
@@ -2686,23 +2896,23 @@ if __name__ == "__main__":
         z_mode="seam_centroid_to_centroid_direction",
         random_seed=seed_base,
         p2p_parts=[
-            "left_upper_leg", 
-            "right_upper_leg", 
-            "left_lower_arm", 
-            "right_lower_arm",
-            "left_upper_arm",
-            "right_upper_arm",
-            "left_lower_leg",
-            "right_lower_leg",
+            # "left_upper_leg", 
+            # "right_upper_leg", 
+            # "left_lower_arm", 
+            # "right_lower_arm",
+            # "left_upper_arm",
+            # "right_upper_arm",
+            # "left_lower_leg",
+            # "right_lower_leg",
         ],
         # debug_parts=["left_lower_arm", "right_lower_arm"],
         debug_parts=[
             "left_upper_leg",
             "right_upper_leg",
-            "left_lower_arm",
-            "right_lower_arm",
-            "left_upper_arm",
-            "right_upper_arm",
+            # "left_lower_arm",
+            # "right_lower_arm",
+            # "left_upper_arm",
+            # "right_upper_arm",
             "left_lower_leg",
             "right_lower_leg",
         ],
@@ -2714,14 +2924,20 @@ if __name__ == "__main__":
         double_sided_data_terms=True,
         use_sinkhorn_matches=True,
         use_sinkhorn_matches_initial=False,
+        # use_sinkhorn_matches_initial=True,
         sinkhorn_kwargs=dict(
             eps=1e-2,
             tau=5e-1,
             n_iters=40,
+            # pos_weight=0.5,
+            # normal_weight=0.5,
         ),
         compute_normals_on_the_fly=True,
         initial_axis_flip_debug_plotly=True,
         initial_axis_flip_axes=["x", "y", "z"],
+        # initial_axis_flip_normal_agreement_weight=0.0,
+        # initial_axis_flip_seam_normal_weight=1.0,
+        initial_axis_flip_seam_normal_weight=0.0,
     )
 
     rng_source = np.random.default_rng(seed_base)
