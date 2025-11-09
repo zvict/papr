@@ -24,6 +24,9 @@ class PAPR(nn.Module):
         self.use_amp = args.use_amp
         self.amp_dtype = torch.float16 if args.amp_dtype == 'float16' else torch.bfloat16
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
+        
+        self.pruned_points = False
+        self.added_points = False
 
         point_opt = args.geoms.points
         pc_feat_opt = args.geoms.point_feats
@@ -349,18 +352,10 @@ class PAPR(nn.Module):
 
             num_pruned = torch.sum(mask == 0).item()
             if num_pruned > 0:
-                cur_requires_grad = self.points.requires_grad
-                self.points = nn.Parameter(self.points[mask, :], requires_grad=cur_requires_grad)
-                print("@@@@@@@@@ New points: ", self.points.shape)
-
-                cur_requires_grad = self.points_influ_scores.requires_grad
-                self.points_influ_scores = nn.Parameter(self.points_influ_scores[mask, :], requires_grad=cur_requires_grad)
-                print("@@@@@@@@@ New points_influ_scores: ", self.points_influ_scores.shape)
-
-                if self.use_pc_feats:
-                    cur_requires_grad = self.pc_feats.requires_grad
-                    self.pc_feats = nn.Parameter(self.pc_feats[mask, :], requires_grad=cur_requires_grad)
-                    print("@@@@@@@@@ New pc_feats: ", self.pc_feats.shape)
+                optimizable_tensors = self._prune_optimizer(mask)
+                self.points = optimizable_tensors["points"]
+                self.points_influ_scores = optimizable_tensors["points_influ_scores"]
+                self.pc_feats = optimizable_tensors["pc_feats"]
                     
                 self.points_last_grad = nn.Parameter(self.points_last_grad[mask, :], requires_grad=False)
                 self.points_acc_grad = nn.Parameter(self.points_acc_grad[mask, :], requires_grad=False)
@@ -398,19 +393,15 @@ class PAPR(nn.Module):
         print("@@@@@@@@@  added {} points".format(num_new_points))
 
         if num_new_points > 0:
-            cur_requires_grad = self.points.requires_grad
-            self.points = nn.Parameter(torch.cat([points, new_points], dim=0).to(self.points.device), requires_grad=cur_requires_grad)
-            print("@@@@@@@@@ New points: ", self.points.shape)
-
-            if self.points_influ_scores is not None:
-                cur_requires_grad = self.points_influ_scores.requires_grad
-                self.points_influ_scores = nn.Parameter(torch.cat([self.points_influ_scores, new_influ_scores.to(self.points_influ_scores.device)], dim=0), requires_grad=cur_requires_grad)
-                print("@@@@@@@@@ New points_influ_scores: ", self.points_influ_scores.shape)
-
-            if self.use_pc_feats:
-                cur_requires_grad = self.pc_feats.requires_grad
-                self.pc_feats = nn.Parameter(torch.cat([self.pc_feats, new_point_features.to(self.pc_feats.device)], dim=0), requires_grad=cur_requires_grad)
-                print("@@@@@@@@@ New pc_feats: ", self.pc_feats.shape)
+            d = {
+                "points": new_points.to(self.points.device),
+                "points_influ_scores": new_influ_scores.to(self.points_influ_scores.device),
+                "pc_feats": new_point_features.to(self.pc_feats.device),
+            }
+            optimizable_tensors = self.cat_tensors_to_optimizer(d)
+            self.points = optimizable_tensors["points"]
+            self.points_influ_scores = optimizable_tensors["points_influ_scores"]
+            self.pc_feats = optimizable_tensors["pc_feats"]
             
             self.points_last_grad = nn.Parameter(torch.zeros(self.points.shape[0], 3, device=self.points.device), requires_grad=False)
             self.points_acc_grad = nn.Parameter(torch.zeros(self.points.shape[0], 3, device=self.points.device), requires_grad=False)
@@ -672,3 +663,126 @@ class PAPR(nn.Module):
             self.points_influ_scores = nn.Parameter(state_dict['points_influ_scores'].data, requires_grad=self.points_influ_scores.requires_grad)
         self.pc_feats = nn.Parameter(state_dict['pc_feats'].data, requires_grad=self.pc_feats.requires_grad)
         print("load pc_feats", self.pc_feats.shape, self.pc_feats.min(), self.pc_feats.max())
+        
+    def _prune_optimizer(self, mask):
+        optimizable_tensors = {}
+        # List of parameter names that are point-specific and need pruning.
+        # These names correspond to the keys in the self.optimizers dictionary.
+        params_to_prune = ["points", "points_influ_scores", "pc_feats"]
+
+        for name, optimizer in self.optimizers.items():
+            if name not in params_to_prune:
+                continue # Skip optimizers that do not manage point-specific parameters
+
+            # Assuming each of these optimizers manages a single parameter group
+            assert len(optimizer.param_groups) == 1, f"Optimizer for '{name}' should have only one parameter group"
+            group = optimizer.param_groups[0]
+            old_param = group['params'][0]
+
+            # Get the optimizer state associated with the old parameter object
+            stored_state = optimizer.state.get(old_param, None)
+
+            # Create the new, pruned parameter from the data
+            new_param = nn.Parameter(old_param.data[mask], requires_grad=old_param.requires_grad)
+
+            # --- Correctly prune the gradient ---
+            # If a gradient exists (i.e., after loss.backward()), it must also be pruned.
+            if old_param.grad is not None:
+                new_param.grad = old_param.grad[mask]
+
+            if stored_state is not None:
+                # Prune the state tensors (e.g., 'exp_avg', 'exp_avg_sq' for Adam)
+                if 'exp_avg' in stored_state:
+                    stored_state["exp_avg"] = stored_state["exp_avg"][mask]
+                if 'exp_avg_sq' in stored_state:
+                    stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][mask]
+
+                # Update the optimizer to track the new parameter and its state
+                del optimizer.state[old_param]          # Remove state for the old parameter ID
+                group['params'][0] = new_param          # Point the param_group to the new parameter object
+                optimizer.state[new_param] = stored_state # Re-assign the pruned state to the new parameter ID
+            else:
+                # If optimizer has no state, just update the parameter
+                group['params'][0] = new_param
+
+            # Store the new parameter to be updated in the model
+            optimizable_tensors[name] = new_param
+            
+        return optimizable_tensors
+    
+    def replace_tensor_to_optimizer(self, tensor, name):
+        optimizable_tensors = {}
+        for opt_name, optimizer in self.optimizers.items():
+            if opt_name == name:
+                group = optimizer.param_groups[0]
+                old_param = group['params'][0]
+                stored_state = optimizer.state.get(old_param, None)
+                
+                new_param = nn.Parameter(tensor.requires_grad_(True))
+                if old_param.grad is not None:
+                    # If the old parameter has a gradient, we need to create a new gradient for the new parameter.
+                    new_param.grad = torch.zeros_like(old_param.grad)
+                
+                if stored_state is not None:
+                    # For optimizers like Adam, we need to resize the state tensors.
+                    if 'exp_avg' in stored_state:
+                        stored_state["exp_avg"] = torch.zeros_like(tensor)
+                    if 'exp_avg_sq' in stored_state:
+                        stored_state["exp_avg_sq"] = torch.zeros_like(tensor)
+                        
+                    del optimizer.state[old_param]
+                    group['params'][0] = new_param
+                    optimizer.state[new_param] = stored_state
+                else:
+                    group['params'][0] = new_param
+
+                optimizable_tensors[name] = new_param
+        return optimizable_tensors
+
+    def cat_tensors_to_optimizer(self, tensors_dict):
+        optimizable_tensors = {}
+        for name, extension_tensor in tensors_dict.items():
+            assert isinstance(extension_tensor, torch.Tensor), "Tensor {} is not a torch.Tensor".format(name)
+            if name not in self.optimizers:
+                raise ValueError("Optimizer for {} not found".format(name))
+            assert len(self.optimizers[name].param_groups) == 1, "Optimizer for {} should have only one parameter group".format(name)
+            
+            optimizer = self.optimizers[name]
+            group = optimizer.param_groups[0]
+            old_param = group['params'][0]
+
+            # --- 1. Create the new, larger parameter ---
+            # Concatenate the data of the old parameter with the new extension tensor.
+            new_param_data = torch.cat((old_param.data, extension_tensor), dim=0)
+            new_param = nn.Parameter(new_param_data, requires_grad=old_param.requires_grad)
+
+            # --- 2. Preserve and extend the gradient ---
+            # This happens after loss.backward(), so old_param.grad exists.
+            if old_param.grad is not None:
+                # The new parts of the parameter have no gradient from the last backward pass.
+                extension_grad = torch.zeros_like(extension_tensor)
+                new_grad_data = torch.cat((old_param.grad, extension_grad), dim=0)
+                new_param.grad = new_grad_data
+
+            # --- 3. Update the optimizer's state (e.g., for Adam) ---
+            stored_state = optimizer.state.get(old_param, None)
+            if stored_state is not None:
+                # For Adam, 'exp_avg' and 'exp_avg_sq' must be resized.
+                if 'exp_avg' in stored_state:
+                    extension_state = torch.zeros_like(extension_tensor)
+                    stored_state['exp_avg'] = torch.cat((stored_state['exp_avg'], extension_state), dim=0)
+                if 'exp_avg_sq' in stored_state:
+                    extension_state = torch.zeros_like(extension_tensor)
+                    stored_state['exp_avg_sq'] = torch.cat((stored_state['exp_avg_sq'], extension_state), dim=0)
+                
+                # --- 4. Update the optimizer to track the new parameter ---
+                # This is the most critical step.
+                del optimizer.state[old_param]          # Remove the state entry keyed by the old parameter's ID.
+                group['params'][0] = new_param          # Update the parameter group to point to the new parameter object.
+                optimizer.state[new_param] = stored_state # Add a new state entry keyed by the new parameter's ID.
+            else:
+                # If there's no state, just update the parameter group.
+                group['params'][0] = new_param
+
+            optimizable_tensors[name] = new_param
+        return optimizable_tensors

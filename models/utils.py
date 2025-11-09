@@ -154,7 +154,7 @@ def add_points_knn(coords, influ_scores, add_num, k, comb_type="mean", sample_ty
                 new_features = (point_features[nns_inds, :] * (1 / (nns_dists + 1e-6)).reshape(-1, k, 1)).sum(axis=-2) / (1 / (nns_dists + 1e-6)).sum(axis=-1, keepdims=True)
         else:
             raise NotImplementedError
-    return new_coords, len(new_coords), new_influ_scores, new_features, inds
+    return new_coords, len(new_coords), new_influ_scores, new_features
 
 
 def cam_to_world(coords, c2w, vector=True):

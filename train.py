@@ -170,11 +170,44 @@ def train_step(step, model, device, dataset, batch, loss_fn, args):
     out = model.last_act(out)
     loss = loss_fn(out, tgt)
     model.scaler.scale(loss).backward()
-    model.step(step)
-    if args.scaler_min_scale > 0 and model.scaler.get_scale() < args.scaler_min_scale:
-        model.scaler.update(args.scaler_min_scale)
-    else:
-        model.scaler.update()
+    
+    with torch.no_grad():
+        prune_thresh = args.training.prune_thresh
+        if (args.training.prune_steps > 0) and (step < args.training.prune_stop) and (step >= args.training.prune_start):
+            if len(args.training.prune_steps_list) > 0:
+                prune_thresh = args.training.prune_thresh_list[bisect.bisect_left(args.training.prune_steps_list, step)]
+
+            if step % args.training.prune_steps == 0:
+                num_pruned = model.prune_points(prune_thresh)
+                model.pruned_points = True
+                print("Step %d: Pruned %d points, prune threshold %f" % (step, num_pruned, prune_thresh))
+
+        if model.pruned_points and len(args.training.add_steps_list) > 0:
+            if step in args.training.add_steps_list:
+                cur_add_num = args.training.add_num_list[args.training.add_steps_list.index(step)]
+                if 'max_num_pts' in args and args.max_num_pts > 0:
+                    cur_add_num = min(cur_add_num, args.max_num_pts - model.points.shape[0])
+                
+                if cur_add_num > 0:
+                    num_added = model.add_points(cur_add_num)
+                    model.added_points = True
+                    print("Step %d: Added %d points" % (step, num_added))
+
+        elif model.pruned_points and (args.training.add_steps > 0) and (step % args.training.add_steps == 0) and (step < args.training.add_stop) and (step >= args.training.add_start):
+            cur_add_num = args.training.add_num
+            if 'max_num_pts' in args and args.max_num_pts > 0:
+                cur_add_num = min(cur_add_num, args.max_num_pts - model.points.shape[0])
+            
+            if cur_add_num > 0:
+                num_added = model.add_points(args.training.add_num)
+                model.added_points = True
+                print("Step %d: Added %d points" % (step, num_added))
+                
+        model.step(step)
+        if args.scaler_min_scale > 0 and model.scaler.get_scale() < args.scaler_min_scale:
+            model.scaler.update(args.scaler_min_scale)
+        else:
+            model.scaler.update()
 
     return loss.item(), out.detach().cpu().numpy()
 
@@ -197,58 +230,12 @@ def train_and_eval(start_step, model, device, dataset, eval_dataset, losses, arg
     avg_train_loss = 0.
     step = start_step
     eval_step_cnt = start_step
-    pruned = False
     pc_frames = []
 
     print("Start step:", start_step, "Total steps:", args.training.steps)
     start_time = time.time()
     while step < args.training.steps:
         for _, batch in enumerate(trainloader):
-            if (args.training.prune_steps > 0) and (step < args.training.prune_stop) and (step >= args.training.prune_start):
-                if len(args.training.prune_steps_list) > 0 and step % args.training.prune_steps == 0:
-                    cur_prune_thresh = args.training.prune_thresh_list[bisect.bisect_left(args.training.prune_steps_list, step)]
-                    model.clear_optimizer()
-                    model.clear_scheduler()
-                    num_pruned = model.prune_points(cur_prune_thresh)
-                    model.init_optimizers(step)
-                    pruned = True
-                    print("Step %d: Pruned %d points, prune threshold %f" % (step, num_pruned, cur_prune_thresh))
-
-                elif step % args.training.prune_steps == 0:
-                    model.clear_optimizer()
-                    model.clear_scheduler()
-                    num_pruned = model.prune_points(args.training.prune_thresh)
-                    model.init_optimizers(step)
-                    pruned = True
-                    print("Step %d: Pruned %d points" % (step, num_pruned))
-
-            if pruned and len(args.training.add_steps_list) > 0:
-                if step in args.training.add_steps_list:
-                    cur_add_num = args.training.add_num_list[args.training.add_steps_list.index(step)]
-                    if 'max_num_pts' in args and args.max_num_pts > 0:
-                        cur_add_num = min(cur_add_num, args.max_num_pts - model.points.shape[0])
-                    
-                    if cur_add_num > 0:
-                        model.clear_optimizer()
-                        model.clear_scheduler()
-                        num_added = model.add_points(cur_add_num)
-                        model.init_optimizers(step)
-                        model.added_points = True
-                        print("Step %d: Added %d points" % (step, num_added))
-
-            elif pruned and (args.training.add_steps > 0) and (step % args.training.add_steps == 0) and (step < args.training.add_stop) and (step >= args.training.add_start):
-                cur_add_num = args.training.add_num
-                if 'max_num_pts' in args and args.max_num_pts > 0:
-                    cur_add_num = min(cur_add_num, args.max_num_pts - model.points.shape[0])
-                
-                if cur_add_num > 0:
-                    model.clear_optimizer()
-                    model.clear_scheduler()
-                    num_added = model.add_points(args.training.add_num)
-                    model.init_optimizers(step)
-                    model.added_points = True
-                    print("Step %d: Added %d points" % (step, num_added))
-
             loss, out = train_step(step, model, device, dataset, batch, loss_fn, args)
             avg_train_loss += loss
             step += 1
