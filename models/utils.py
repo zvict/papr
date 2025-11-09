@@ -6,7 +6,8 @@ from scipy.spatial import KDTree
 import numpy as np
 
 
-def add_points_knn(coords, influ_scores, add_num, k, comb_type="mean", sample_type="random", sample_k=10, point_features=None):
+def add_points_knn(coords, influ_scores, add_num, k, comb_type="mean", sample_type="random", sample_k=10, point_features=None, 
+                   last_coord_grad=None, acc_coord_grad=None, acc_coord_grad_norm=None, grad_cnt=None, hybrid_weight=0.5):
     """
     Add points to the point cloud by kNN
     """
@@ -50,11 +51,49 @@ def add_points_knn(coords, influ_scores, add_num, k, comb_type="mean", sample_ty
         elif sample_type == "influ-scores-min":
             inds = np.argsort(influ_scores.squeeze())[:add_num]
             query_coords = coords[inds, :]
+        elif sample_type == "influ-scores-max":
+            inds = np.argsort(influ_scores.squeeze())[-add_num:]
+            query_coords = coords[inds, :]
+        elif sample_type == "influ-scores-min":
+            inds = np.argsort(influ_scores.squeeze())[:add_num]
+            query_coords = coords[inds, :]
+        elif sample_type == "last-coord-grad-max":
+            inds = np.argsort(last_coord_grad.abs().sum(-1))[-add_num:]
+            query_coords = coords[inds, :]
+        elif sample_type == "acc-coord-grad-max":
+            inds = np.argsort(acc_coord_grad.abs().sum(-1))[-add_num:]
+            query_coords = coords[inds, :]
+        elif sample_type == "acc-coord-grad-cnt-max":
+            inds = np.argsort(acc_coord_grad.abs().sum(-1) / (grad_cnt + 1))[-add_num:]
+            query_coords = coords[inds, :]
+        elif sample_type == "acc-coord-grad-norm-max":  # the togo now
+            inds = np.argsort(acc_coord_grad_norm)[-add_num:]
+            query_coords = coords[inds, :]
+        elif sample_type == "acc-coord-grad-norm-cnt-max":
+            inds = np.argsort(acc_coord_grad_norm / (grad_cnt + 1))[-add_num:]
+            query_coords = coords[inds, :]
+        elif sample_type == "acc-coord-grad-norm-max-hybrid-top-knn-std":
+            inds_a = np.argsort(acc_coord_grad_norm)
+            ranks_a = np.zeros_like(inds_a)
+            ranks_a[inds_a] = np.arange(len(inds_a))
+            
+            assert k >= 2
+            pc = KDTree(coords)
+            nns_dists, nns_inds = pc.query(coords, k=sample_k+1)
+            nns_dists = nns_dists[:, 1:]
+            inds_b = np.argsort(nns_dists.std(axis=-1))
+            ranks_b = np.zeros_like(inds_b)
+            ranks_b[inds_b] = np.arange(len(inds_b))
+
+            ranks = hybrid_weight * ranks_a + (1 - hybrid_weight) * ranks_b
+            inds = np.argsort(ranks)[-add_num:]
+            query_coords = coords[inds, :]
         else:
             raise NotImplementedError
 
     # Step 2: Add points by kNN
     new_features = None
+    move_scale = 2.0
     if comb_type == "duplicate":
         noise = np.random.randn(3).astype(np.float32)
         noise = noise / np.linalg.norm(noise)
@@ -63,7 +102,13 @@ def add_points_knn(coords, influ_scores, add_num, k, comb_type="mean", sample_ty
         new_influ_scores = influ_scores[inds, :]
         if point_features is not None:
             new_features = point_features[inds, :]
+    elif comb_type == "clone":
+        new_coords = query_coords
+        new_influ_scores = influ_scores[inds, :]
+        if point_features is not None:
+            new_features = point_features[inds, :]
     else:
+        pc = KDTree(coords)
         nns_dists, nns_inds = pc.query(query_coords, k=k+1)
         nns_dists = nns_dists.astype(np.float32)
         nns_dists = nns_dists[:, 1:]
@@ -75,38 +120,41 @@ def add_points_knn(coords, influ_scores, add_num, k, comb_type="mean", sample_ty
             if point_features is not None:
                 new_features = point_features[nns_inds, :].mean(axis=-2)
         elif comb_type == "random":
-            rnd_w = np.random.uniform(
-                0, 1, (query_coords.shape[0], k)).astype(np.float32)
+            rnd_w = np.random.uniform(0, 1, (query_coords.shape[0], k)).astype(np.float32)
             rnd_w /= rnd_w.sum(axis=-1, keepdims=True)
-            new_coords = (coords[nns_inds, :] *
-                          rnd_w.reshape(-1, k, 1)).sum(axis=-2)
-            new_influ_scores = (
-                influ_scores[nns_inds, :] * rnd_w.reshape(-1, k, 1)).sum(axis=-2)
+            new_coords = (coords[nns_inds, :] * rnd_w.reshape(-1, k, 1)).sum(axis=-2)
+            new_influ_scores = (influ_scores[nns_inds, :] * rnd_w.reshape(-1, k, 1)).sum(axis=-2)
             if point_features is not None:
-                new_features = (
-                    point_features[nns_inds, :] * rnd_w.reshape(-1, k, 1)).sum(axis=-2)
+                new_features = (point_features[nns_inds, :] * rnd_w.reshape(-1, k, 1)).sum(axis=-2)
         elif comb_type == "random-softmax":
-            rnd_w = np.random.randn(
-                query_coords.shape[0], k).astype(np.float32)
+            rnd_w = np.random.randn(query_coords.shape[0], k).astype(np.float32)
             rnd_w = scipy.special.softmax(rnd_w, axis=-1)
-            new_coords = (coords[nns_inds, :] *
-                          rnd_w.reshape(-1, k, 1)).sum(axis=-2)
-            new_influ_scores = (
-                influ_scores[nns_inds, :] * rnd_w.reshape(-1, k, 1)).sum(axis=-2)
+            new_coords = (coords[nns_inds, :] * rnd_w.reshape(-1, k, 1)).sum(axis=-2)
+            new_influ_scores = (influ_scores[nns_inds, :] * rnd_w.reshape(-1, k, 1)).sum(axis=-2)
             if point_features is not None:
-                new_features = (
-                    point_features[nns_inds, :] * rnd_w.reshape(-1, k, 1)).sum(axis=-2)
+                new_features = (point_features[nns_inds, :] * rnd_w.reshape(-1, k, 1)).sum(axis=-2)
         elif comb_type == "weighted":
-            new_coords = (coords[nns_inds, :] * (1 / (nns_dists + 1e-6)).reshape(-1, k, 1)).sum(
-                axis=-2) / (1 / (nns_dists + 1e-6)).sum(axis=-1, keepdims=True)
-            new_influ_scores = (influ_scores[nns_inds, :] * (1 / (nns_dists + 1e-6)).reshape(-1, k, 1)).sum(
-                axis=-2) / (1 / (nns_dists + 1e-6)).sum(axis=-1, keepdims=True)
+            new_coords = (coords[nns_inds, :] * (1 / (nns_dists + 1e-6)).reshape(-1, k, 1)).sum(axis=-2) / (1 / (nns_dists + 1e-6)).sum(axis=-1, keepdims=True)
+            new_influ_scores = (influ_scores[nns_inds, :] * (1 / (nns_dists + 1e-6)).reshape(-1, k, 1)).sum(axis=-2) / (1 / (nns_dists + 1e-6)).sum(axis=-1, keepdims=True)
             if point_features is not None:
-                new_features = (point_features[nns_inds, :] * (1 / (nns_dists + 1e-6)).reshape(-1, k, 1)).sum(
-                    axis=-2) / (1 / (nns_dists + 1e-6)).sum(axis=-1, keepdims=True)
+                new_features = (point_features[nns_inds, :] * (1 / (nns_dists + 1e-6)).reshape(-1, k, 1)).sum(axis=-2) / (1 / (nns_dists + 1e-6)).sum(axis=-1, keepdims=True)
+        elif comb_type == "along-last-coord-grad":
+            new_coords = query_coords + last_coord_grad[inds, :] * move_scale
+            nns_dists, nns_inds = pc.query(new_coords, k=k)
+            nns_dists = nns_dists.astype(np.float32)
+            new_influ_scores = (influ_scores[nns_inds, :] * (1 / (nns_dists + 1e-6)).reshape(-1, k, 1)).sum(axis=-2) / (1 / (nns_dists + 1e-6)).sum(axis=-1, keepdims=True)
+            if point_features is not None:
+                new_features = (point_features[nns_inds, :] * (1 / (nns_dists + 1e-6)).reshape(-1, k, 1)).sum(axis=-2) / (1 / (nns_dists + 1e-6)).sum(axis=-1, keepdims=True)
+        elif comb_type == "along-acc-coord-grad":
+            new_coords = query_coords + acc_coord_grad[inds, :] * move_scale
+            nns_dists, nns_inds = pc.query(new_coords, k=k)
+            nns_dists = nns_dists.astype(np.float32)
+            new_influ_scores = (influ_scores[nns_inds, :] * (1 / (nns_dists + 1e-6)).reshape(-1, k, 1)).sum(axis=-2) / (1 / (nns_dists + 1e-6)).sum(axis=-1, keepdims=True)
+            if point_features is not None:
+                new_features = (point_features[nns_inds, :] * (1 / (nns_dists + 1e-6)).reshape(-1, k, 1)).sum(axis=-2) / (1 / (nns_dists + 1e-6)).sum(axis=-1, keepdims=True)
         else:
             raise NotImplementedError
-    return new_coords, len(new_coords), new_influ_scores, new_features
+    return new_coords, len(new_coords), new_influ_scores, new_features, inds
 
 
 def cam_to_world(coords, c2w, vector=True):

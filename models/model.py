@@ -61,6 +61,11 @@ class PAPR(nn.Module):
         # Initialize point influence scores
         self.points_influ_scores = torch.nn.Parameter(torch.ones(
             points.shape[0], 1, device=device) * point_opt.influ_init_val, requires_grad=True)
+            
+        self.points_last_grad = nn.Parameter(torch.zeros(points.shape[0], 3, device=device), requires_grad=False)
+        self.points_acc_grad = nn.Parameter(torch.zeros(points.shape[0], 3, device=device), requires_grad=False)
+        self.points_acc_grad_norm = nn.Parameter(torch.zeros(points.shape[0], device=device), requires_grad=False)
+        self.points_grad_cnt = nn.Parameter(torch.zeros(points.shape[0], device=device), requires_grad=False)
 
         # Initialize mapping MLP, only if fine-tuning with IMLE for the exposure control
         self.mapping_mlp = None
@@ -333,6 +338,7 @@ class PAPR(nn.Module):
         return selected_points, select_k_ind
 
     def prune_points(self, thresh):
+        num_pruned = 0
         if self.points_influ_scores is not None:
             if self.args.training.prune_type == '<':
                 mask = (self.points_influ_scores[:, 0] > thresh)
@@ -341,26 +347,37 @@ class PAPR(nn.Module):
             print(
                 "@@@@@@@@@  pruned {}/{}".format(torch.sum(mask == 0), mask.shape[0]))
 
-            cur_requires_grad = self.points.requires_grad
-            self.points = nn.Parameter(self.points[mask, :], requires_grad=cur_requires_grad)
-            print("@@@@@@@@@ New points: ", self.points.shape)
+            num_pruned = torch.sum(mask == 0).item()
+            if num_pruned > 0:
+                cur_requires_grad = self.points.requires_grad
+                self.points = nn.Parameter(self.points[mask, :], requires_grad=cur_requires_grad)
+                print("@@@@@@@@@ New points: ", self.points.shape)
 
-            cur_requires_grad = self.points_influ_scores.requires_grad
-            self.points_influ_scores = nn.Parameter(self.points_influ_scores[mask, :], requires_grad=cur_requires_grad)
-            print("@@@@@@@@@ New points_influ_scores: ", self.points_influ_scores.shape)
+                cur_requires_grad = self.points_influ_scores.requires_grad
+                self.points_influ_scores = nn.Parameter(self.points_influ_scores[mask, :], requires_grad=cur_requires_grad)
+                print("@@@@@@@@@ New points_influ_scores: ", self.points_influ_scores.shape)
 
-            if self.use_pc_feats:
-                cur_requires_grad = self.pc_feats.requires_grad
-                self.pc_feats = nn.Parameter(self.pc_feats[mask, :], requires_grad=cur_requires_grad)
-                print("@@@@@@@@@ New pc_feats: ", self.pc_feats.shape)
+                if self.use_pc_feats:
+                    cur_requires_grad = self.pc_feats.requires_grad
+                    self.pc_feats = nn.Parameter(self.pc_feats[mask, :], requires_grad=cur_requires_grad)
+                    print("@@@@@@@@@ New pc_feats: ", self.pc_feats.shape)
+                    
+                self.points_last_grad = nn.Parameter(self.points_last_grad[mask, :], requires_grad=False)
+                self.points_acc_grad = nn.Parameter(self.points_acc_grad[mask, :], requires_grad=False)
+                self.points_acc_grad_norm = nn.Parameter(self.points_acc_grad_norm[mask], requires_grad=False)
+                self.points_grad_cnt = nn.Parameter(self.points_grad_cnt[mask], requires_grad=False)
 
-            return torch.sum(mask == 0)
-        return 0
+        return num_pruned
 
     def add_points(self, add_num):
         points = self.points.detach().cpu()
         point_features = None
         cur_num_points = points.shape[0]
+
+        print("@@@@@@@@@  last_coord_grad: ", self.points_last_grad.shape, self.points_last_grad.min().item(), self.points_last_grad.max().item())
+        print("@@@@@@@@@  acc_coord_grad: ", self.points_acc_grad.shape, self.points_acc_grad.min().item(), self.points_acc_grad.max().item())
+        print("@@@@@@@@@  acc_coord_grad_norm: ", self.points_acc_grad_norm.shape, self.points_acc_grad_norm.min().item(), self.points_acc_grad_norm.max().item())
+        print("@@@@@@@@@  grad_cnt: ", self.points_grad_cnt.shape, self.points_grad_cnt.min().item(), self.points_grad_cnt.max().item())
 
         if 'max_points' in self.args and self.args.max_points > 0 and (cur_num_points + add_num) >= self.args.max_points:
             add_num = self.args.max_points - cur_num_points
@@ -373,7 +390,11 @@ class PAPR(nn.Module):
         new_points, num_new_points, new_influ_scores, new_point_features = add_points_knn(points, self.points_influ_scores.detach().cpu(), add_num=add_num,
                                                                                             k=self.args.geoms.points.add_k, comb_type=self.args.geoms.points.add_type,
                                                                                             sample_k=self.args.geoms.points.add_sample_k, sample_type=self.args.geoms.points.add_sample_type,
-                                                                                            point_features=point_features)
+                                                                                            point_features=point_features,
+                                                                                            last_coord_grad=self.points_last_grad.detach().cpu(), 
+                                                                                            acc_coord_grad=self.points_acc_grad.detach().cpu(), 
+                                                                                            acc_coord_grad_norm=self.points_acc_grad_norm.detach().cpu(),
+                                                                                            grad_cnt=self.points_grad_cnt.detach().cpu())
         print("@@@@@@@@@  added {} points".format(num_new_points))
 
         if num_new_points > 0:
@@ -390,6 +411,11 @@ class PAPR(nn.Module):
                 cur_requires_grad = self.pc_feats.requires_grad
                 self.pc_feats = nn.Parameter(torch.cat([self.pc_feats, new_point_features.to(self.pc_feats.device)], dim=0), requires_grad=cur_requires_grad)
                 print("@@@@@@@@@ New pc_feats: ", self.pc_feats.shape)
+            
+            self.points_last_grad = nn.Parameter(torch.zeros(self.points.shape[0], 3, device=self.points.device), requires_grad=False)
+            self.points_acc_grad = nn.Parameter(torch.zeros(self.points.shape[0], 3, device=self.points.device), requires_grad=False)
+            self.points_acc_grad_norm = nn.Parameter(torch.zeros(self.points.shape[0], device=self.points.device), requires_grad=False)
+            self.points_grad_cnt = nn.Parameter(torch.zeros(self.points.shape[0], device=self.points.device), requires_grad=False)     
 
         return num_new_points
 
@@ -437,6 +463,11 @@ class PAPR(nn.Module):
         return key, query, value, k_extra, q_extra, v_extra
 
     def step(self, step=-1):
+        self.points_last_grad.data = self.points.grad
+        self.points_acc_grad.data += self.points.grad
+        self.points_acc_grad_norm.data += torch.norm(self.points.grad, dim=-1)
+        self.points_grad_cnt.data += (self.points.grad.abs().sum(-1) != 0).float()
+        
         for _, optimizer in self.optimizers.items():
             if optimizer is not None:
                 self.scaler.step(optimizer)
@@ -623,7 +654,7 @@ class PAPR(nn.Module):
                     print("exclude", name)
                     break
             else:
-                if name not in ['points', 'points_influ_scores', 'pc_feats']:
+                if name not in ['points', 'points_influ_scores', 'pc_feats', 'points_last_grad', 'points_acc_grad', 'points_acc_grad_norm', 'points_grad_cnt']:
                     if isinstance(param, nn.Parameter):
                         # backwards compatibility for serialized parameters
                         param = param.data
@@ -632,10 +663,12 @@ class PAPR(nn.Module):
                     except:
                         print("Can't load", name)
 
-        self.points = nn.Parameter(
-            state_dict['points'].data, requires_grad=self.points.requires_grad)
+        self.points = nn.Parameter(state_dict['points'].data, requires_grad=self.points.requires_grad)
+        self.points_last_grad = nn.Parameter(state_dict['points_last_grad'].data, requires_grad=False)
+        self.points_acc_grad = nn.Parameter(state_dict['points_acc_grad'].data, requires_grad=False)
+        self.points_acc_grad_norm = nn.Parameter(state_dict['points_acc_grad_norm'].data, requires_grad=False)
+        self.points_grad_cnt = nn.Parameter(state_dict['points_grad_cnt'].data, requires_grad=False)
         if self.points_influ_scores is not None:
-            self.points_influ_scores = nn.Parameter(
-                state_dict['points_influ_scores'].data, requires_grad=self.points_influ_scores.requires_grad)
+            self.points_influ_scores = nn.Parameter(state_dict['points_influ_scores'].data, requires_grad=self.points_influ_scores.requires_grad)
         self.pc_feats = nn.Parameter(state_dict['pc_feats'].data, requires_grad=self.pc_feats.requires_grad)
         print("load pc_feats", self.pc_feats.shape, self.pc_feats.min(), self.pc_feats.max())
