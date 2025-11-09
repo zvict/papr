@@ -122,4 +122,4 @@ class LPNet(nn.Module):
         for ll in range(1, self.L):
             val += res[ll]
 
-        return val.squeeze()
+        return val.squeeze().mean()

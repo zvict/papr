@@ -29,7 +29,9 @@ def parse_args():
 def eval_step(steps, model, device, dataset, eval_dataset, batch, loss_fn, train_out, args, train_losses, eval_losses, eval_psnrs, pt_lrs, attn_lrs):
     step = steps[-1]
     train_img_idx, _, train_patch, _, _  = batch
-    train_img, train_rayd, train_rayo = dataset.get_full_img(train_img_idx[0])
+    # For visualization, use the first image in the batch
+    first_idx = train_img_idx[0].item() if isinstance(train_img_idx, torch.Tensor) else train_img_idx[0]
+    train_img, train_rayd, train_rayo = dataset.get_full_img(first_idx)
     img, rayd, rayo = eval_dataset.get_full_img(args.eval.img_idx)
     c2w = eval_dataset.get_c2w(args.eval.img_idx)
     
@@ -114,6 +116,7 @@ def eval_step(steps, model, device, dataset, eval_dataset, batch, loss_fn, train
         cur_depth = (torch.sum(attn.squeeze(-1).to(od.device) * dists, dim=-1)).detach().cpu()
 
         train_tgt_rgb = train_img.squeeze().cpu().numpy().astype(np.float32)
+        # For visualization, use the first patch/output in the batch
         train_tgt_patch = train_patch[0].cpu().numpy().astype(np.float32)
         train_pred_patch = train_out[0]
         test_tgt_rgb = img.squeeze().cpu().numpy().astype(np.float32)
@@ -151,7 +154,11 @@ def eval_step(steps, model, device, dataset, eval_dataset, batch, loss_fn, train
 
 def train_step(step, model, device, dataset, batch, loss_fn, args):
     img_idx, _, tgt, rayd, rayo = batch
-    c2w = dataset.get_c2w(img_idx[0])
+    # Get c2w for all images in the batch
+    if isinstance(img_idx, torch.Tensor):
+        c2w = torch.stack([dataset.get_c2w(idx.item()) for idx in img_idx])
+    else:
+        c2w = torch.stack([dataset.get_c2w(idx) for idx in img_idx])
 
     rayo = rayo.to(device)
     rayd = rayd.to(device)
