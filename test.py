@@ -15,6 +15,7 @@ from utils import *
 from dataset import get_dataset, get_loader
 from models import get_model, get_loss
 import lpips
+from piq import LPIPS
 try:
     from skimage.measure import compare_ssim
 except:
@@ -185,7 +186,7 @@ def test(model, device, dataset, save_name, args, config, resume_step, shading_c
     loss_fn = get_loss(args.training.losses)
     loss_fn = loss_fn.to(device)
 
-    lpips_loss_fn_alex = lpips.LPIPS(net='alex', version='0.1')
+    lpips_loss_fn_alex = LPIPS()
     lpips_loss_fn_alex = lpips_loss_fn_alex.to(device)
     lpips_loss_fn_vgg = lpips.LPIPS(net='vgg', version='0.1')
     lpips_loss_fn_vgg = lpips_loss_fn_vgg.to(device)

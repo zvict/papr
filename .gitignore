@@ -9,4 +9,5 @@ checkpoints/
 *.out
 *.mp4
 *.tar.gz
+configs/papr*.yml
 !vgg.pth

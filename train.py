@@ -362,7 +362,7 @@ if __name__ == '__main__':
     shutil.copyfile(__file__, os.path.join(log_dir, os.path.basename(__file__)))
     shutil.copyfile(args.opt, os.path.join(log_dir, os.path.basename(args.opt)))
 
-    find_all_python_files_and_zip(".", os.path.join(log_dir, "code.zip"))
+    # find_all_python_files_and_zip(".", os.path.join(log_dir, "code.zip"))
 
     setup_seed(train_config.seed)
 

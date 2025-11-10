@@ -3,6 +3,8 @@ import torch
 import math
 from .load_t2 import load_t2_data
 from .load_nerfsyn import load_blender_data
+from .load_dtu_colmap_coord import load_dtu_colmap_coord_data
+from .load_dtu_colmap_coord_with_train import load_dtu_colmap_coord_data_with_train
 
 
 def cam_to_world(coords, c2w, vector=True):
@@ -157,6 +159,38 @@ def load_meta_data(args, mode="train"):
             images = images[..., :3]
             mask = images.sum(-1) == 3.0
             images[mask] = 0.
+
+    elif args.type == "dtu_colmap_coord":
+        images, poses, hwf, image_paths = load_dtu_colmap_coord_data(
+            args.path, split=mode, factor=args.factor, read_offline=args.read_offline)
+        print('Loaded DTU', images.shape, hwf, args.path)
+        
+        H, W, focal_x, focal_y = hwf
+        hwf = [H, W, focal_x, focal_y]
+        
+        masks = images[..., -1:]
+         
+        if args.white_bg:
+            images = images[..., :3] * \
+                images[..., -1:] + (1. - images[..., -1:])
+        else:
+            images = images[..., :3]
+    
+    elif args.type == "dtu_colmap_coord_with_train":
+        images, poses, hwf, image_paths = load_dtu_colmap_coord_data_with_train(
+            args.path, split=mode, factor=args.factor, read_offline=args.read_offline)
+        print('Loaded DTU', images.shape, hwf, args.path)
+        
+        H, W, focal_x, focal_y = hwf
+        hwf = [H, W, focal_x, focal_y]
+        
+        masks = images[..., -1:]
+         
+        if args.white_bg:
+            images = images[..., :3] * \
+                images[..., -1:] + (1. - images[..., -1:])
+        else:
+            images = images[..., :3]
 
     else:
         raise ValueError("Unknown dataset type: {}".format(args.type))

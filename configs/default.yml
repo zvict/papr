@@ -29,6 +29,7 @@ geoms:
     select_k_type: "d2r"  # select k points based on their distances to the rays (d2r)
     select_k_sorted: false  # sort the indices of selected points by select_k_type
     load_path: "" # path to load the point cloud from
+    load_and_combine: false # load the point cloud from the path and combine with the initial points
     init_type: "cube" # initialize the point cloud in a cube or on a sphere ("sphere")
     init_scale: [1.2, 1.2, 1.2] # initial scale of the point cloud, normalized by the coord_scale
     init_center: [0.0, 0.0, 0.0]  # initial center of the point cloud, normalized by the coord_scale
@@ -172,6 +173,7 @@ training:
     lpips: 1.0e-2
     lpips_alex: 0.0
   lr:
+    use_warmup: true
     lr_factor: 1.0  # learning rate factor, multiply all the learning rates by this factor
     mapping_mlp:
       type: "none"

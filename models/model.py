@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import math
 import os
 import numpy as np
+import open3d as o3d
 from .utils import normalize_vector, create_learning_rate_fn, add_points_knn, activation_func
 from .mlp import get_mapping_mlp
 from .attn import get_proximity_attention_layer
@@ -36,6 +37,7 @@ class PAPR(nn.Module):
 
         self.coord_scale = args.dataset.coord_scale
 
+        num_loaded_points = point_opt.init_num
         if point_opt.load_path:
             if point_opt.load_path.endswith('.pth') or point_opt.load_path.endswith('.pt'):
                 points = torch.load(point_opt.load_path, map_location='cpu')
@@ -43,6 +45,24 @@ class PAPR(nn.Module):
                 np.random.shuffle(points)
                 points = points[:args.max_num_pts, :]
                 points = torch.from_numpy(points).float()
+            elif point_opt.load_path.endswith('.ply'):
+                points = o3d.io.read_point_cloud(point_opt.load_path)
+                points = np.asarray(points.points).astype(np.float32)
+                np.random.shuffle(points)
+                points = points[:args.max_num_pts, :]
+                points = points * self.coord_scale
+                points = torch.from_numpy(points).float()
+            num_loaded_points = points.shape[0]
+            if point_opt.load_and_combine:
+                pt_init_center = [i * self.coord_scale for i in point_opt.init_center]
+                pt_init_scale = [i * self.coord_scale for i in point_opt.init_scale]
+                if point_opt.init_type == 'sphere': # initial points on a sphere
+                    noisy_points = self._sphere_pc(pt_init_center, point_opt.init_num, pt_init_scale)
+                elif point_opt.init_type == 'cube': # initial points in a cube
+                    noisy_points = self._cube_normal_pc(pt_init_center, point_opt.init_num, pt_init_scale)
+                else:
+                    raise NotImplementedError("Point init type [{:s}] is not found".format(point_opt.init_type))
+                points = torch.cat([points, noisy_points], dim=0)
             print("Loaded points from {}, shape: {}, dtype {}".format(point_opt.load_path, points.shape, points.dtype))
             print("Loaded points scale: ", points[:, 0].min(), points[:, 0].max(), points[:, 1].min(), points[:, 1].max(), points[:, 2].min(), points[:, 2].max())
         else:
@@ -66,6 +86,11 @@ class PAPR(nn.Module):
         self.points_acc_grad = nn.Parameter(torch.zeros(points.shape[0], 3, device=device), requires_grad=False)
         self.points_acc_grad_norm = nn.Parameter(torch.zeros(points.shape[0], device=device), requires_grad=False)
         self.points_grad_cnt = nn.Parameter(torch.zeros(points.shape[0], device=device), requires_grad=False)
+        
+        if point_opt.load_path and point_opt.load_and_combine:
+            points_influ_scores = torch.ones(points.shape[0], 1, device=device) * args.training.prune_thresh
+            points_influ_scores[:num_loaded_points] = point_opt.influ_init_val
+            self.points_influ_scores = torch.nn.Parameter(points_influ_scores, requires_grad=True)
 
         # Initialize mapping MLP, only if fine-tuning with IMLE for the exposure control
         self.mapping_mlp = None
@@ -127,9 +152,9 @@ class PAPR(nn.Module):
         optimizer_points_influ_scores = torch.optim.Adam([self.points_influ_scores], lr=lr_opt.points_influ_scores.base_lr * lr_opt.lr_factor, weight_decay=lr_opt.points_influ_scores.weight_decay)
 
         debug = False
-        lr_scheduler_points = create_learning_rate_fn(optimizer_points, self.args.training.steps, lr_opt.points, debug=debug)
-        lr_scheduler_attn = create_learning_rate_fn(optimizer_attn, self.args.training.steps, lr_opt.attn, debug=debug)
-        lr_scheduler_points_influ_scores = create_learning_rate_fn(optimizer_points_influ_scores, self.args.training.steps, lr_opt.points_influ_scores, debug=debug)
+        lr_scheduler_points = create_learning_rate_fn(optimizer_points, self.args.training.steps, lr_opt.points, use_warmup=lr_opt.use_warmup, debug=debug)
+        lr_scheduler_attn = create_learning_rate_fn(optimizer_attn, self.args.training.steps, lr_opt.attn, use_warmup=lr_opt.use_warmup, debug=debug)
+        lr_scheduler_points_influ_scores = create_learning_rate_fn(optimizer_points_influ_scores, self.args.training.steps, lr_opt.points_influ_scores, use_warmup=lr_opt.use_warmup, debug=debug)
 
         self.optimizers = {
             "points": optimizer_points,
@@ -145,28 +170,28 @@ class PAPR(nn.Module):
 
         if self.use_pc_feats:
             optimizer_pc_feats = torch.optim.Adam([self.pc_feats], lr=lr_opt.feats.base_lr * lr_opt.lr_factor, weight_decay=lr_opt.feats.weight_decay)
-            lr_scheduler_pc_feats = create_learning_rate_fn(optimizer_pc_feats, self.args.training.steps, lr_opt.feats, debug=debug)
+            lr_scheduler_pc_feats = create_learning_rate_fn(optimizer_pc_feats, self.args.training.steps, lr_opt.feats, use_warmup=lr_opt.use_warmup, debug=debug)
 
             self.optimizers["pc_feats"] = optimizer_pc_feats
             self.schedulers["pc_feats"] = lr_scheduler_pc_feats
 
         if self.mapping_mlp is not None:
             optimizer_mapping_mlp = torch.optim.Adam(self.mapping_mlp.parameters(), lr=lr_opt.mapping_mlp.base_lr * lr_opt.lr_factor, weight_decay=lr_opt.mapping_mlp.weight_decay)
-            lr_scheduler_mapping_mlp = create_learning_rate_fn(optimizer_mapping_mlp, self.args.training.steps, lr_opt.mapping_mlp, debug=debug)
+            lr_scheduler_mapping_mlp = create_learning_rate_fn(optimizer_mapping_mlp, self.args.training.steps, lr_opt.mapping_mlp, use_warmup=lr_opt.use_warmup, debug=debug)
 
             self.optimizers["mapping_mlp"] = optimizer_mapping_mlp
             self.schedulers["mapping_mlp"] = lr_scheduler_mapping_mlp
 
         if self.args.models.use_renderer:
             optimizer_renderer = torch.optim.Adam(self.renderer.parameters(), lr=lr_opt.generator.base_lr * lr_opt.lr_factor, weight_decay=lr_opt.generator.weight_decay)
-            lr_scheduler_renderer = create_learning_rate_fn(optimizer_renderer, self.args.training.steps, lr_opt.generator, debug=debug)
+            lr_scheduler_renderer = create_learning_rate_fn(optimizer_renderer, self.args.training.steps, lr_opt.generator, use_warmup=lr_opt.use_warmup, debug=debug)
 
             self.optimizers["renderer"] = optimizer_renderer
             self.schedulers["renderer"] = lr_scheduler_renderer
 
         if self.bkg_feats is not None and self.args.geoms.background.learnable:
             optimizer_bkg_feats = torch.optim.Adam([self.bkg_feats], lr=lr_opt.bkg_feats.base_lr * lr_opt.lr_factor, weight_decay=lr_opt.bkg_feats.weight_decay)
-            lr_scheduler_bkg_feats = create_learning_rate_fn(optimizer_bkg_feats, self.args.training.steps, lr_opt.bkg_feats, debug=debug)
+            lr_scheduler_bkg_feats = create_learning_rate_fn(optimizer_bkg_feats, self.args.training.steps, lr_opt.bkg_feats, use_warmup=lr_opt.use_warmup, debug=debug)
 
             self.optimizers["bkg_feats"] = optimizer_bkg_feats
             self.schedulers["bkg_feats"] = lr_scheduler_bkg_feats

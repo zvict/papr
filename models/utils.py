@@ -305,12 +305,14 @@ def normalize_vector(x, eps=0.):
     return x / (torch.norm(x, dim=-1, keepdim=True) + eps)
 
 
-def create_learning_rate_fn(optimizer, max_steps, args, debug=False):
+def create_learning_rate_fn(optimizer, max_steps, args, use_warmup=True, debug=False):
     """Create learning rate schedule."""
     if args.type == "none":
         return None
 
-    if args.warmup > 0:
+    warmup = args.warmup if use_warmup else 0
+
+    if warmup > 0:
         warmup_start_factor = 1e-16
     else:
         warmup_start_factor = 1.0
@@ -318,46 +320,46 @@ def create_learning_rate_fn(optimizer, max_steps, args, debug=False):
     warmup_fn = lr_scheduler.LinearLR(optimizer,
                                       start_factor=warmup_start_factor,
                                       end_factor=1.0,
-                                      total_iters=args.warmup,
+                                      total_iters=warmup,
                                       verbose=debug)
 
     if args.type == "linear":
         decay_fn = lr_scheduler.LinearLR(optimizer,
                                          start_factor=1.0,
                                          end_factor=0.,
-                                         total_iters=max_steps - args.warmup,
+                                         total_iters=max_steps - warmup,
                                          verbose=debug)
         schedulers = [warmup_fn, decay_fn]
-        milestones = [args.warmup]
+        milestones = [warmup]
 
     elif args.type == "cosine":
-        cosine_steps = max(max_steps - args.warmup, 1)
+        cosine_steps = max(max_steps - warmup, 1)
         decay_fn = lr_scheduler.CosineAnnealingLR(optimizer,
                                                   T_max=cosine_steps,
                                                   verbose=debug)
         schedulers = [warmup_fn, decay_fn]
-        milestones = [args.warmup]
+        milestones = [warmup]
 
     elif args.type == "cosine-hlfperiod":
-        cosine_steps = max(max_steps - args.warmup, 1) * 2
+        cosine_steps = max(max_steps - warmup, 1) * 2
         decay_fn = lr_scheduler.CosineAnnealingLR(optimizer,
                                                   T_max=cosine_steps,
                                                   verbose=debug)
         schedulers = [warmup_fn, decay_fn]
-        milestones = [args.warmup]
+        milestones = [warmup]
 
     elif args.type == "exp":
         decay_fn = lr_scheduler.ExponentialLR(optimizer,
                                               gamma=args.gamma,
                                               verbose=debug)
         schedulers = [warmup_fn, decay_fn]
-        milestones = [args.warmup]
+        milestones = [warmup]
 
     elif args.type == "stop":
         decay_fn = lr_scheduler.StepLR(
             optimizer, step_size=1, gamma=0.0, verbose=debug)
         schedulers = [warmup_fn, decay_fn]
-        milestones = [args.warmup]
+        milestones = [warmup]
 
     else:
         raise NotImplementedError
