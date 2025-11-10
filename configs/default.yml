@@ -18,7 +18,7 @@ dataset:
   shuffle: true
   extract_patch: true # extract patches from the target images
   extract_online: true  # set to false if you have enough memory to load all the patches into memory before training
-  read_offline: false # set to true if you have enough memory to load all the images into memory before training
+  read_offline: true # set to true if you have enough memory to load all the images into memory before training
   patches:
     height: 160 # patch height
     width: 160  # patch width
